@@ -33,6 +33,9 @@ struct BLUEPRINTANALYZER_API FBlueprintNodeInfo
     UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
     FString NodeGuid;
 
+    UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
+    FString NodeId;
+
     // Phase 1: name of the graph this node belongs to (EventGraph / function / macro / etc.)
     UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
     FString GraphName;
@@ -50,6 +53,9 @@ struct BLUEPRINTANALYZER_API FBlueprintNodeInfo
         NodeType = TEXT("");
         NodeName = TEXT("");
         FunctionName = TEXT("");
+        NodeGuid = TEXT("");
+        NodeId = TEXT("");
+        GraphName = TEXT("");
     }
 };
 
@@ -62,10 +68,28 @@ struct BLUEPRINTANALYZER_API FBlueprintConnectionInfo
     FString FromNodeGuid;
 
     UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
+    FString FromNodeId;
+
+    UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
+    FString FromNodeName;
+
+    UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
+    FString FromGraphName;
+
+    UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
     FString FromPinName;
 
     UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
     FString ToNodeGuid;
+
+    UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
+    FString ToNodeId;
+
+    UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
+    FString ToNodeName;
+
+    UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
+    FString ToGraphName;
 
     UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
     FString ToPinName;
@@ -73,8 +97,14 @@ struct BLUEPRINTANALYZER_API FBlueprintConnectionInfo
     FBlueprintConnectionInfo()
     {
         FromNodeGuid = TEXT("");
+        FromNodeId = TEXT("");
+        FromNodeName = TEXT("");
+        FromGraphName = TEXT("");
         FromPinName = TEXT("");
         ToNodeGuid = TEXT("");
+        ToNodeId = TEXT("");
+        ToNodeName = TEXT("");
+        ToGraphName = TEXT("");
         ToPinName = TEXT("");
     }
 };
@@ -273,6 +303,9 @@ struct BLUEPRINTANALYZER_API FExecutionStep
     FString NodeGuid;
 
     UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
+    FString NodeId;
+
+    UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
     FString NodeType;
 
     UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
@@ -292,6 +325,11 @@ struct BLUEPRINTANALYZER_API FExecutionStep
 
     FExecutionStep()
     {
+        NodeGuid = TEXT("");
+        NodeId = TEXT("");
+        NodeType = TEXT("");
+        Summary = TEXT("");
+        BranchLabel = TEXT("");
         Depth = 0;
         bIsTerminator = false;
         bIsLatent = false;
@@ -310,6 +348,9 @@ struct BLUEPRINTANALYZER_API FExecutionPath
     FString EntryNodeGuid;
 
     UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
+    FString EntryNodeId;
+
+    UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
     FString GraphName;
 
     UPROPERTY(BlueprintReadOnly, Category = "BlueprintAnalyzer")
@@ -317,6 +358,10 @@ struct BLUEPRINTANALYZER_API FExecutionPath
 
     FExecutionPath()
     {
+        EntryPointName = TEXT("");
+        EntryNodeGuid = TEXT("");
+        EntryNodeId = TEXT("");
+        GraphName = TEXT("");
     }
 };
 
@@ -718,9 +763,9 @@ public:
 
 private:
     // Original Blueprint Analysis Helper Functions
-    static FBlueprintNodeInfo ExtractNodeInfo(UK2Node* Node);
+    static FBlueprintNodeInfo ExtractNodeInfo(class UEdGraphNode* Node);
     static TArray<FBlueprintConnectionInfo> ExtractConnections(UEdGraph* Graph);
-    static FString GetNodeTypeName(UK2Node* Node);
+    static FString GetNodeTypeName(class UEdGraphNode* Node);
 
     // Phase 1: Metadata Extraction Helper Functions
     static FBPAnalyzerMetadata ExtractMetadata(UBlueprint* Blueprint);
@@ -737,7 +782,7 @@ private:
         int32 Depth,
         const FString& BranchLabel,
         TArray<FExecutionStep>& OutSteps,
-        TSet<FGuid>& VisitedNodes);
+        TSet<const class UK2Node*>& VisitedNodes);
     static FString GetExecutionStepSummary(class UK2Node* Node);
 
     // Widget Analysis Helper Functions

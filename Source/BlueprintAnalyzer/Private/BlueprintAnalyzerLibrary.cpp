@@ -17,6 +17,7 @@
 #include "K2Node_SpawnActorFromClass.h"
 #include "K2Node_Knot.h"
 #include "K2Node_Composite.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphNode_Comment.h"
 #include "EdGraph/EdGraphSchema.h"
@@ -59,6 +60,112 @@
 static TArray<TSharedPtr<FJsonValue>> StringArrayToJson(const TArray<FString>& InArray);
 static TArray<TSharedPtr<FJsonValue>> ParamsToJson(const TArray<FBPFunctionParam>& Params);
 static TSharedPtr<FJsonObject> MetadataToJson(const FBPAnalyzerMetadata& Meta);
+static TArray<UEdGraph*> CollectAllAnalyzableGraphs(UBlueprint* Blueprint, bool bIncludeIntermediateGraphs = true);
+static bool IsIncludedAnalysisNode(const UEdGraphNode* Node);
+static bool IsExecutionEntryNode(UK2Node* Node);
+static bool IsNestedExecutionGraph(UEdGraph* Graph);
+static FString MakeNodeId(const FString& GraphName, const FString& NodeGuid);
+static FString GetNodeGraphName(const UEdGraphNode* Node);
+
+static void AddGraphAndNestedGraphs(UEdGraph* Graph, TArray<UEdGraph*>& OutGraphs, TSet<const UEdGraph*>& VisitedGraphs)
+{
+    if (!Graph || VisitedGraphs.Contains(Graph))
+    {
+        return;
+    }
+
+    VisitedGraphs.Add(Graph);
+    OutGraphs.Add(Graph);
+
+    TArray<UEdGraph*> ChildGraphs;
+    Graph->GetAllChildrenGraphs(ChildGraphs);
+    for (UEdGraph* ChildGraph : ChildGraphs)
+    {
+        AddGraphAndNestedGraphs(ChildGraph, OutGraphs, VisitedGraphs);
+    }
+
+    for (UEdGraphNode* GraphNode : Graph->Nodes)
+    {
+        if (!GraphNode)
+        {
+            continue;
+        }
+
+        for (UEdGraph* SubGraph : GraphNode->GetSubGraphs())
+        {
+            AddGraphAndNestedGraphs(SubGraph, OutGraphs, VisitedGraphs);
+        }
+    }
+}
+
+static TArray<UEdGraph*> CollectAllAnalyzableGraphs(UBlueprint* Blueprint, bool bIncludeIntermediateGraphs)
+{
+    TArray<UEdGraph*> Result;
+    if (!Blueprint)
+    {
+        return Result;
+    }
+
+    TSet<const UEdGraph*> VisitedGraphs;
+
+    TArray<UEdGraph*> BlueprintGraphs;
+    Blueprint->GetAllGraphs(BlueprintGraphs);
+    for (UEdGraph* Graph : BlueprintGraphs)
+    {
+        AddGraphAndNestedGraphs(Graph, Result, VisitedGraphs);
+    }
+
+    if (bIncludeIntermediateGraphs)
+    {
+        for (UEdGraph* Graph : Blueprint->IntermediateGeneratedGraphs)
+        {
+            AddGraphAndNestedGraphs(Graph, Result, VisitedGraphs);
+        }
+    }
+
+    return Result;
+}
+
+static bool IsIncludedAnalysisNode(const UEdGraphNode* Node)
+{
+    return Node && !Node->IsA<UEdGraphNode_Comment>();
+}
+
+static bool IsExecutionEntryNode(UK2Node* Node)
+{
+    return Node &&
+        (Node->IsA<UK2Node_Event>() ||
+         Node->IsA<UK2Node_CustomEvent>() ||
+         Node->IsA<UK2Node_FunctionEntry>() ||
+         Node->DrawNodeAsEntry());
+}
+
+static bool IsNestedExecutionGraph(UEdGraph* Graph)
+{
+    return Graph && Cast<UEdGraphNode>(Graph->GetOuter()) != nullptr;
+}
+
+static FString MakeNodeId(const FString& GraphName, const FString& NodeGuid)
+{
+    return GraphName.IsEmpty()
+        ? NodeGuid
+        : FString::Printf(TEXT("%s::%s"), *GraphName, *NodeGuid);
+}
+
+static FString GetNodeGraphName(const UEdGraphNode* Node)
+{
+    if (!Node)
+    {
+        return FString();
+    }
+
+    if (const UEdGraph* Graph = Node->GetGraph())
+    {
+        return Graph->GetName();
+    }
+
+    return FString();
+}
 
 // Original Blueprint Analysis Functions Implementation
 FBlueprintAnalysisResult UBlueprintAnalyzerLibrary::AnalyzeBlueprint(UBlueprint* Blueprint)
@@ -84,11 +191,12 @@ FBlueprintAnalysisResult UBlueprintAnalyzerLibrary::AnalyzeBlueprint(UBlueprint*
             const FString GraphName = Graph->GetName();
             for (UEdGraphNode* GraphNode : Graph->Nodes)
             {
-                if (UK2Node* K2Node = Cast<UK2Node>(GraphNode))
+                if (IsIncludedAnalysisNode(GraphNode))
                 {
-                    FBlueprintNodeInfo NodeInfo = ExtractNodeInfo(K2Node);
+                    FBlueprintNodeInfo NodeInfo = ExtractNodeInfo(GraphNode);
                     NodeInfo.GraphName = GraphName;
-                    NodeInfo.CommentGroup = FindCommentGroupForNode(K2Node, Graph);
+                    NodeInfo.NodeId = MakeNodeId(NodeInfo.GraphName, NodeInfo.NodeGuid);
+                    NodeInfo.CommentGroup = FindCommentGroupForNode(GraphNode, Graph);
                     Result.Nodes.Add(NodeInfo);
                 }
             }
@@ -97,24 +205,22 @@ FBlueprintAnalysisResult UBlueprintAnalyzerLibrary::AnalyzeBlueprint(UBlueprint*
         }
     };
 
-    ProcessGraphs(Blueprint->UbergraphPages);
-    ProcessGraphs(Blueprint->FunctionGraphs);
-    ProcessGraphs(Blueprint->MacroGraphs);
-    ProcessGraphs(Blueprint->DelegateSignatureGraphs);
-    ProcessGraphs(Blueprint->IntermediateGeneratedGraphs);
+    ProcessGraphs(CollectAllAnalyzableGraphs(Blueprint));
 
     Result.ExecutionPaths = TraceExecutionPaths(Blueprint);
 
     return Result;
 }
 
-FBlueprintNodeInfo UBlueprintAnalyzerLibrary::ExtractNodeInfo(UK2Node* Node)
+FBlueprintNodeInfo UBlueprintAnalyzerLibrary::ExtractNodeInfo(UEdGraphNode* Node)
 {
     FBlueprintNodeInfo NodeInfo;
 
     if (!Node) return NodeInfo;
 
     NodeInfo.NodeGuid = Node->NodeGuid.ToString();
+    NodeInfo.GraphName = GetNodeGraphName(Node);
+    NodeInfo.NodeId = MakeNodeId(NodeInfo.GraphName, NodeInfo.NodeGuid);
     NodeInfo.NodeType = GetNodeTypeName(Node);
     NodeInfo.NodeName = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
 
@@ -173,21 +279,30 @@ TArray<FBlueprintConnectionInfo> UBlueprintAnalyzerLibrary::ExtractConnections(U
 
     for (UEdGraphNode* GraphNode : Graph->Nodes)
     {
-        UK2Node* K2Node = Cast<UK2Node>(GraphNode);
-        if (!K2Node) continue;
+        if (!IsIncludedAnalysisNode(GraphNode)) continue;
 
-        for (UEdGraphPin* Pin : K2Node->Pins)
+        for (UEdGraphPin* Pin : GraphNode->Pins)
         {
             if (Pin->Direction == EGPD_Output && Pin->LinkedTo.Num() > 0)
             {
                 for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
                 {
-                    if (LinkedPin && LinkedPin->GetOwningNode())
+                    UEdGraphNode* ToNode = LinkedPin ? LinkedPin->GetOwningNode() : nullptr;
+                    if (ToNode)
                     {
+                        const FString FromGraphName = GetNodeGraphName(GraphNode);
+                        const FString ToGraphName = GetNodeGraphName(ToNode);
+
                         FBlueprintConnectionInfo ConnectionInfo;
-                        ConnectionInfo.FromNodeGuid = K2Node->NodeGuid.ToString();
+                        ConnectionInfo.FromNodeGuid = GraphNode->NodeGuid.ToString();
+                        ConnectionInfo.FromNodeId = MakeNodeId(FromGraphName, ConnectionInfo.FromNodeGuid);
+                        ConnectionInfo.FromNodeName = GraphNode->GetNodeTitle(ENodeTitleType::ListView).ToString();
+                        ConnectionInfo.FromGraphName = FromGraphName;
                         ConnectionInfo.FromPinName = Pin->PinName.ToString();
-                        ConnectionInfo.ToNodeGuid = LinkedPin->GetOwningNode()->NodeGuid.ToString();
+                        ConnectionInfo.ToNodeGuid = ToNode->NodeGuid.ToString();
+                        ConnectionInfo.ToNodeId = MakeNodeId(ToGraphName, ConnectionInfo.ToNodeGuid);
+                        ConnectionInfo.ToNodeName = ToNode->GetNodeTitle(ENodeTitleType::ListView).ToString();
+                        ConnectionInfo.ToGraphName = ToGraphName;
                         ConnectionInfo.ToPinName = LinkedPin->PinName.ToString();
                         
                         Connections.Add(ConnectionInfo);
@@ -200,7 +315,7 @@ TArray<FBlueprintConnectionInfo> UBlueprintAnalyzerLibrary::ExtractConnections(U
     return Connections;
 }
 
-FString UBlueprintAnalyzerLibrary::GetNodeTypeName(UK2Node* Node)
+FString UBlueprintAnalyzerLibrary::GetNodeTypeName(UEdGraphNode* Node)
 {
     if (!Node) return TEXT("Unknown");
 
@@ -564,11 +679,11 @@ void UBlueprintAnalyzerLibrary::TraceFromNode(
     int32 Depth,
     const FString& BranchLabel,
     TArray<FExecutionStep>& OutSteps,
-    TSet<FGuid>& VisitedNodes)
+    TSet<const UK2Node*>& VisitedNodes)
 {
     // Safety: depth cap and cycle guard
     const int32 MaxDepth = 64;
-    const int32 MaxSteps = 512;
+    const int32 MaxSteps = 2048;
     if (!StartNode || Depth > MaxDepth || OutSteps.Num() > MaxSteps) return;
 
     UK2Node* Current = StartNode;
@@ -580,10 +695,11 @@ void UBlueprintAnalyzerLibrary::TraceFromNode(
         if (OutSteps.Num() > MaxSteps) return;
 
         // Cycle detection — if we've already visited this node, add a marker and stop
-        if (VisitedNodes.Contains(Current->NodeGuid))
+        if (VisitedNodes.Contains(Current))
         {
             FExecutionStep Step;
             Step.NodeGuid = Current->NodeGuid.ToString();
+            Step.NodeId = MakeNodeId(GetNodeGraphName(Current), Step.NodeGuid);
             Step.NodeType = TEXT("Loopback");
             Step.Summary = FString::Printf(TEXT("-> back to %s"), *GetExecutionStepSummary(Current));
             Step.BranchLabel = CurrentLabel;
@@ -592,11 +708,12 @@ void UBlueprintAnalyzerLibrary::TraceFromNode(
             OutSteps.Add(Step);
             return;
         }
-        VisitedNodes.Add(Current->NodeGuid);
+        VisitedNodes.Add(Current);
 
         // Record this step
         FExecutionStep Step;
         Step.NodeGuid = Current->NodeGuid.ToString();
+        Step.NodeId = MakeNodeId(GetNodeGraphName(Current), Step.NodeGuid);
         Step.NodeType = GetNodeTypeName(Current);
         Step.Summary = GetExecutionStepSummary(Current);
         Step.BranchLabel = CurrentLabel;
@@ -613,6 +730,24 @@ void UBlueprintAnalyzerLibrary::TraceFromNode(
 
         OutSteps.Add(Step);
         CurrentLabel.Reset();
+
+        for (UEdGraph* SubGraph : Current->GetSubGraphs())
+        {
+            if (!SubGraph)
+            {
+                continue;
+            }
+
+            const FString InlineLabel = FString::Printf(TEXT("Inside %s"), *SubGraph->GetName());
+            for (UEdGraphNode* GraphNode : SubGraph->Nodes)
+            {
+                UK2Node* EntryNode = Cast<UK2Node>(GraphNode);
+                if (IsExecutionEntryNode(EntryNode))
+                {
+                    TraceFromNode(EntryNode, CurrentDepth + 1, InlineLabel, OutSteps, VisitedNodes);
+                }
+            }
+        }
 
         // Branch handling: Branch (IfThenElse), Sequence, Cast with success/fail
         if (UK2Node_IfThenElse* BranchNode = Cast<UK2Node_IfThenElse>(Current))
@@ -725,6 +860,25 @@ static bool IsBeginPlayEvent(UK2Node* Node)
     return false;
 }
 
+static void QueueExecutionEntryNodes(UEdGraph* Graph, TArray<UK2Node*>& Stack)
+{
+    if (!Graph)
+    {
+        return;
+    }
+
+    for (UEdGraphNode* GraphNode : Graph->Nodes)
+    {
+        if (UK2Node* K2Node = Cast<UK2Node>(GraphNode))
+        {
+            if (IsExecutionEntryNode(K2Node))
+            {
+                Stack.Push(K2Node);
+            }
+        }
+    }
+}
+
 // Walks exec-flow downstream from an event node and collects every reachable K2Node
 static void CollectReachableNodes(UK2Node* Start, TSet<UK2Node*>& OutVisited)
 {
@@ -738,6 +892,16 @@ static void CollectReachableNodes(UK2Node* Start, TSet<UK2Node*>& OutVisited)
         UK2Node* Current = Stack.Pop();
         if (!Current || OutVisited.Contains(Current)) continue;
         OutVisited.Add(Current);
+
+        if (UK2Node_MacroInstance* MacroNode = Cast<UK2Node_MacroInstance>(Current))
+        {
+            QueueExecutionEntryNodes(MacroNode->GetMacroGraph(), Stack);
+        }
+
+        for (UEdGraph* SubGraph : Current->GetSubGraphs())
+        {
+            QueueExecutionEntryNodes(SubGraph, Stack);
+        }
 
         for (UEdGraphPin* Pin : Current->Pins)
         {
@@ -791,9 +955,9 @@ FBPPerformanceReport UBlueprintAnalyzerLibrary::AnalyzeBlueprintPerformance(UBlu
     Report.BlueprintName = Blueprint->GetName();
     Report.AnalysisTimestamp = FDateTime::Now().ToString();
 
-    // Collect all event graph nodes
+    // Score source graphs only; saved compiler intermediates contain copies of source nodes.
     TArray<UK2Node*> AllNodes;
-    for (UEdGraph* Graph : Blueprint->UbergraphPages)
+    for (UEdGraph* Graph : CollectAllAnalyzableGraphs(Blueprint, false))
     {
         if (!Graph) continue;
         for (UEdGraphNode* GraphNode : Graph->Nodes)
@@ -1002,24 +1166,22 @@ TArray<FExecutionPath> UBlueprintAnalyzerLibrary::TraceExecutionPaths(UBlueprint
         for (UEdGraph* Graph : Graphs)
         {
             if (!Graph) continue;
+            if (IsNestedExecutionGraph(Graph)) continue;
 
             for (UEdGraphNode* GraphNode : Graph->Nodes)
             {
                 UK2Node* K2Node = Cast<UK2Node>(GraphNode);
                 if (!K2Node) continue;
 
-                // Entry points: Event, CustomEvent, FunctionEntry
-                const bool bIsEntry = K2Node->IsA<UK2Node_Event>() ||
-                                      K2Node->IsA<UK2Node_CustomEvent>() ||
-                                      K2Node->IsA<UK2Node_FunctionEntry>();
-                if (!bIsEntry) continue;
+                if (!IsExecutionEntryNode(K2Node)) continue;
 
                 FExecutionPath Path;
                 Path.EntryPointName = K2Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
                 Path.EntryNodeGuid = K2Node->NodeGuid.ToString();
+                Path.EntryNodeId = MakeNodeId(Graph->GetName(), Path.EntryNodeGuid);
                 Path.GraphName = Graph->GetName();
 
-                TSet<FGuid> Visited;
+                TSet<const UK2Node*> Visited;
                 TraceFromNode(K2Node, 0, TEXT(""), Path.Steps, Visited);
 
                 if (Path.Steps.Num() > 0)
@@ -1030,8 +1192,7 @@ TArray<FExecutionPath> UBlueprintAnalyzerLibrary::TraceExecutionPaths(UBlueprint
         }
     };
 
-    ProcessGraphsForEntryPoints(Blueprint->UbergraphPages);
-    ProcessGraphsForEntryPoints(Blueprint->FunctionGraphs);
+    ProcessGraphsForEntryPoints(CollectAllAnalyzableGraphs(Blueprint));
 
     return Paths;
 }
@@ -1137,8 +1298,7 @@ TArray<FBPDependency> UBlueprintAnalyzerLibrary::ExtractBlueprintDependencies(UB
         }
     };
 
-    for (UEdGraph* G : Blueprint->UbergraphPages) ProcessGraph(G);
-    for (UEdGraph* G : Blueprint->FunctionGraphs) ProcessGraph(G);
+    for (UEdGraph* G : CollectAllAnalyzableGraphs(Blueprint)) ProcessGraph(G);
 
     return Out;
 }
@@ -1215,13 +1375,16 @@ FBPProjectAnalysis UBlueprintAnalyzerLibrary::AnalyzeFolder(const FString& Folde
         Summary.BlueprintType = GetBlueprintTypeString(BP);
 
         int32 NodeCount = 0;
-        for (UEdGraph* G : BP->UbergraphPages)
+        for (UEdGraph* G : CollectAllAnalyzableGraphs(BP))
         {
-            if (G) NodeCount += G->Nodes.Num();
-        }
-        for (UEdGraph* G : BP->FunctionGraphs)
-        {
-            if (G) NodeCount += G->Nodes.Num();
+            if (!G) continue;
+            for (UEdGraphNode* GraphNode : G->Nodes)
+            {
+                if (IsIncludedAnalysisNode(GraphNode))
+                {
+                    NodeCount++;
+                }
+            }
         }
         Summary.NodeCount = NodeCount;
         NodeSum += NodeCount;
@@ -1462,6 +1625,7 @@ FString UBlueprintAnalyzerLibrary::ExportToJSON(const FBlueprintAnalysisResult& 
     {
         TSharedPtr<FJsonObject> NodeObject = MakeShareable(new FJsonObject);
         NodeObject->SetStringField(TEXT("NodeGuid"), Node.NodeGuid);
+        NodeObject->SetStringField(TEXT("NodeId"), Node.NodeId);
         NodeObject->SetStringField(TEXT("NodeType"), Node.NodeType);
         NodeObject->SetStringField(TEXT("NodeName"), Node.NodeName);
         NodeObject->SetStringField(TEXT("FunctionName"), Node.FunctionName);
@@ -1481,6 +1645,7 @@ FString UBlueprintAnalyzerLibrary::ExportToJSON(const FBlueprintAnalysisResult& 
         TSharedPtr<FJsonObject> PathObject = MakeShareable(new FJsonObject);
         PathObject->SetStringField(TEXT("EntryPointName"), Path.EntryPointName);
         PathObject->SetStringField(TEXT("EntryNodeGuid"), Path.EntryNodeGuid);
+        PathObject->SetStringField(TEXT("EntryNodeId"), Path.EntryNodeId);
         PathObject->SetStringField(TEXT("GraphName"), Path.GraphName);
 
         TArray<TSharedPtr<FJsonValue>> StepsArray;
@@ -1488,6 +1653,7 @@ FString UBlueprintAnalyzerLibrary::ExportToJSON(const FBlueprintAnalysisResult& 
         {
             TSharedPtr<FJsonObject> StepObject = MakeShareable(new FJsonObject);
             StepObject->SetStringField(TEXT("NodeGuid"), Step.NodeGuid);
+            StepObject->SetStringField(TEXT("NodeId"), Step.NodeId);
             StepObject->SetStringField(TEXT("NodeType"), Step.NodeType);
             StepObject->SetStringField(TEXT("Summary"), Step.Summary);
             StepObject->SetStringField(TEXT("BranchLabel"), Step.BranchLabel);
@@ -1506,8 +1672,14 @@ FString UBlueprintAnalyzerLibrary::ExportToJSON(const FBlueprintAnalysisResult& 
     {
         TSharedPtr<FJsonObject> ConnectionObject = MakeShareable(new FJsonObject);
         ConnectionObject->SetStringField(TEXT("FromNodeGuid"), Connection.FromNodeGuid);
+        ConnectionObject->SetStringField(TEXT("FromNodeId"), Connection.FromNodeId);
+        ConnectionObject->SetStringField(TEXT("FromNodeName"), Connection.FromNodeName);
+        ConnectionObject->SetStringField(TEXT("FromGraphName"), Connection.FromGraphName);
         ConnectionObject->SetStringField(TEXT("FromPinName"), Connection.FromPinName);
         ConnectionObject->SetStringField(TEXT("ToNodeGuid"), Connection.ToNodeGuid);
+        ConnectionObject->SetStringField(TEXT("ToNodeId"), Connection.ToNodeId);
+        ConnectionObject->SetStringField(TEXT("ToNodeName"), Connection.ToNodeName);
+        ConnectionObject->SetStringField(TEXT("ToGraphName"), Connection.ToGraphName);
         ConnectionObject->SetStringField(TEXT("ToPinName"), Connection.ToPinName);
         
         ConnectionsArray.Add(MakeShareable(new FJsonValueObject(ConnectionObject)));
@@ -1622,7 +1794,8 @@ FString UBlueprintAnalyzerLibrary::ExportToLLMText(const FBlueprintAnalysisResul
     Result += TEXT("=== NODES ===\n");
     for (const FBlueprintNodeInfo& Node : AnalysisResult.Nodes)
     {
-        Result += FString::Printf(TEXT("- %s [%s]: %s"), *Node.NodeType, *Node.NodeGuid, *Node.NodeName);
+        const FString DisplayNodeId = Node.NodeId.IsEmpty() ? Node.NodeGuid : Node.NodeId;
+        Result += FString::Printf(TEXT("- %s [%s]: %s"), *Node.NodeType, *DisplayNodeId, *Node.NodeName);
         if (!Node.GraphName.IsEmpty())
         {
             Result += FString::Printf(TEXT("  (in graph: %s)"), *Node.GraphName);
@@ -1654,9 +1827,14 @@ FString UBlueprintAnalyzerLibrary::ExportToLLMText(const FBlueprintAnalysisResul
     Result += TEXT("=== CONNECTIONS ===\n");
     for (const FBlueprintConnectionInfo& Connection : AnalysisResult.Connections)
     {
-        Result += FString::Printf(TEXT("%s.%s -> %s.%s\n"),
-            *Connection.FromNodeGuid, *Connection.FromPinName,
-            *Connection.ToNodeGuid, *Connection.ToPinName);
+        const FString FromId = Connection.FromNodeId.IsEmpty() ? Connection.FromNodeGuid : Connection.FromNodeId;
+        const FString ToId = Connection.ToNodeId.IsEmpty() ? Connection.ToNodeGuid : Connection.ToNodeId;
+        const FString FromName = Connection.FromNodeName.IsEmpty() ? FString(TEXT("Unknown")) : Connection.FromNodeName;
+        const FString ToName = Connection.ToNodeName.IsEmpty() ? FString(TEXT("Unknown")) : Connection.ToNodeName;
+
+        Result += FString::Printf(TEXT("- %s [%s].%s -> %s [%s].%s\n"),
+            *FromName, *FromId, *Connection.FromPinName,
+            *ToName, *ToId, *Connection.ToPinName);
     }
 
     // Execution paths — tree-like indented view for LLM consumption
