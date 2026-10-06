@@ -2,10 +2,12 @@
 
 #include "BlueprintAnalyzerMenuExtension.h"
 #include "BlueprintAnalyzerLibrary.h"
+#include "BlueprintEditorContext.h"
 #include "Engine/Blueprint.h"
 #include "Blueprint/UserWidget.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "ContentBrowserModule.h"
+#include "ContentBrowserMenuContexts.h"
 #include "IContentBrowserSingleton.h"
 #include "IContentBrowserDataModule.h"
 #include "ContentBrowserDataSubsystem.h"
@@ -16,6 +18,39 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Widgets/SWindow.h"
 #include "Misc/FileHelper.h"
+#include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "HAL/FileManager.h"
+#include "Misc/ScopedSlowTask.h"
+#include "Styling/AppStyle.h"
+#include "UObject/StrongObjectPtr.h"
+#include "UObject/Package.h"
+
+namespace
+{
+    FString GetLLMAnalysisDirectory()
+    {
+        return FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("LLMAnalisys")));
+    }
+
+    FString GetLLMAnalysisPath(const FString& PackageFolder, const FString& Filename)
+    {
+        // Preserve Unreal mount names (Game, Engine, plugin name), never local Content directory paths.
+        if (!FPackageName::IsValidLongPackageName(PackageFolder + TEXT("/LLMAnalysis"), true))
+        {
+            return FString();
+        }
+        return FPaths::Combine(GetLLMAnalysisDirectory(), PackageFolder.RightChop(1), Filename);
+    }
+
+    bool SaveLLMTextFile(const FString& Content, const FString& OutputPath)
+    {
+        // The default file-writer flags replace an existing report without an overwrite dialog.
+        return !OutputPath.IsEmpty()
+            && IFileManager::Get().MakeDirectory(*FPaths::GetPath(OutputPath), true)
+            && FFileHelper::SaveStringToFile(Content, *OutputPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+    }
+}
 
 void FBlueprintAnalyzerMenuExtension::Initialize()
 {
@@ -34,6 +69,8 @@ void FBlueprintAnalyzerMenuExtension::RegisterMenuExtensions()
     {
         return;
     }
+
+    RegisterBlueprintEditorToolbarExtension(ToolMenus);
 
     // Folder context menu (Phase 4: batch analyze)
     if (UToolMenu* FolderMenu = ToolMenus->ExtendMenu("ContentBrowser.FolderContextMenu"))
@@ -71,99 +108,195 @@ void FBlueprintAnalyzerMenuExtension::RegisterMenuExtensions()
         );
     }
 
-    UToolMenu* ContentBrowserAssetMenu = ToolMenus->ExtendMenu("ContentBrowser.AssetContextMenu.Blueprint");
+    // Use the base menu so selections containing different Blueprint subclasses or other asset types work too.
+    UToolMenu* ContentBrowserAssetMenu = ToolMenus->ExtendMenu("ContentBrowser.AssetContextMenu");
     if (ContentBrowserAssetMenu)
     {
         FToolMenuSection& Section = ContentBrowserAssetMenu->FindOrAddSection("GetAssetActions");
-        Section.AddSubMenu(
-            "BlueprintAnalyzer",
-            FText::FromString("Blueprint Analyzer"),
-            FText::FromString("Blueprint analysis and optimization tools"),
-            FNewToolMenuDelegate::CreateLambda([](UToolMenu* SubMenu)
+        Section.AddDynamicEntry("BlueprintAnalyzerSelection", FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InSection)
+        {
+            const UContentBrowserAssetContextMenuContext* Context = InSection.FindContext<UContentBrowserAssetContextMenuContext>();
+            if (!Context || !Context->SelectedAssets.ContainsByPredicate([](const FAssetData& Asset)
             {
-                FToolMenuSection& SubSection = SubMenu->AddSection("BlueprintAnalyzerActions", FText::FromString("Analysis Actions"));
-                
-                // Regular Blueprint Analysis
-                SubSection.AddMenuEntry(
-                    "AnalyzeBlueprint",
-                    FText::FromString("Analyze Blueprint"),
-                    FText::FromString("Analyze the selected blueprint structure"),
-                    FSlateIcon(),
-                    FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteAnalyzeBlueprint))
-                );
-                
-                SubSection.AddMenuEntry(
-                    "ExportToJSON",
-                    FText::FromString("Export to JSON"),
-                    FText::FromString("Export blueprint analysis to JSON format"),
-                    FSlateIcon(),
-                    FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteExportToJSON))
-                );
-                
-                SubSection.AddMenuEntry(
-                    "ExportToLLMText",
-                    FText::FromString("Export to LLM Text"),
-                    FText::FromString("Export blueprint analysis to LLM-friendly text format"),
-                    FSlateIcon(),
-                    FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMText))
-                );
+                return Asset.IsInstanceOf(UBlueprint::StaticClass());
+            }))
+            {
+                return;
+            }
 
-                // Blueprint Performance Analysis (Phase 3)
-                FToolMenuSection& PerfSection = SubMenu->AddSection("BlueprintPerformanceActions", FText::FromString("Performance Analysis"));
+            // Capture this menu's selection; another Content Browser may have a different active selection.
+            const TArray<FAssetData> SelectedAssets = Context->SelectedAssets;
+            InSection.AddSubMenu(
+                "BlueprintAnalyzer",
+                FText::FromString("Blueprint Analyzer"),
+                FText::FromString("Blueprint analysis and optimization tools"),
+                FNewToolMenuDelegate::CreateLambda([SelectedAssets](UToolMenu* SubMenu)
+                {
+                    FToolMenuSection& SubSection = SubMenu->AddSection("BlueprintAnalyzerActions", FText::FromString("Analysis Actions"));
 
-                PerfSection.AddMenuEntry(
-                    "AnalyzeBlueprintPerformance",
-                    FText::FromString("Analyze Blueprint Performance"),
-                    FText::FromString("Detect performance anti-patterns (Tick-heavy calls, Cast abuse, etc.)"),
-                    FSlateIcon(),
-                    FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteAnalyzeBlueprintPerformance))
-                );
+                    if (SelectedAssets.Num() > 1)
+                    {
+                        SubSection.AddMenuEntry(
+                            "AnalyzeSelectedBlueprintsForLLM",
+                            FText::FromString("Analyze Selected Blueprints for LLM"),
+                            FText::FromString("Save a separate LLM text file per selected Blueprint in Saved/LLMAnalisys, preserving asset folders and replacing previous reports."),
+                            FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Search"),
+                            FUIAction(FExecuteAction::CreateLambda([SelectedAssets]()
+                            {
+                                FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMTextForAssets(SelectedAssets);
+                            }))
+                        );
+                        return;
+                    }
 
-                PerfSection.AddMenuEntry(
-                    "ExportPerformanceToJSON",
-                    FText::FromString("Export Performance Report to JSON"),
-                    FText::FromString("Save performance analysis as JSON"),
-                    FSlateIcon(),
-                    FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteExportPerformanceToJSON))
-                );
+                    // Regular Blueprint Analysis
+                    SubSection.AddMenuEntry(
+                        "AnalyzeBlueprint",
+                        FText::FromString("Analyze Blueprint"),
+                        FText::FromString("Analyze the selected blueprint structure"),
+                        FSlateIcon(),
+                        FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteAnalyzeBlueprint))
+                    );
 
-                PerfSection.AddMenuEntry(
-                    "ExportPerformanceToLLMText",
-                    FText::FromString("Export Performance Report to LLM Text"),
-                    FText::FromString("Save performance analysis as LLM-friendly text"),
-                    FSlateIcon(),
-                    FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteExportPerformanceToLLMText))
-                );
+                    SubSection.AddMenuEntry(
+                        "ExportToJSON",
+                        FText::FromString("Export to JSON"),
+                        FText::FromString("Export blueprint analysis to JSON format"),
+                        FSlateIcon(),
+                        FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteExportToJSON))
+                    );
 
-                // Widget Blueprint Optimization
-                FToolMenuSection& WidgetSection = SubMenu->AddSection("WidgetAnalyzerActions", FText::FromString("Widget Optimization"));
-                
-                WidgetSection.AddMenuEntry(
-                    "AnalyzeWidgetBlueprint",
-                    FText::FromString("Analyze Widget Blueprint"),
-                    FText::FromString("Analyze widget blueprint for optimization opportunities"),
-                    FSlateIcon(),
-                    FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteAnalyzeWidgetBlueprint))
-                );
-                
-                WidgetSection.AddMenuEntry(
-                    "ExportWidgetToJSON",
-                    FText::FromString("Export Widget Analysis to JSON"),
-                    FText::FromString("Export widget optimization report to JSON format"),
-                    FSlateIcon(),
-                    FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteExportWidgetToJSON))
-                );
-                
-                WidgetSection.AddMenuEntry(
-                    "ExportWidgetToLLMText",
-                    FText::FromString("Export Widget Analysis to LLM Text"),
-                    FText::FromString("Export widget optimization report to LLM-friendly text format"),
-                    FSlateIcon(),
-                    FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteExportWidgetToLLMText))
-                );
-            })
-        );
+                    SubSection.AddMenuEntry(
+                        "ExportToLLMText",
+                        FText::FromString("Export to LLM Text"),
+                        FText::FromString("Save blueprint analysis in Saved/LLMAnalisys using its asset folder, replacing the previous report"),
+                        FSlateIcon(),
+                        FUIAction(FExecuteAction::CreateLambda([SelectedAssets]()
+                        {
+                            FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMTextForAssets(SelectedAssets);
+                        }))
+                    );
+
+                    // Blueprint Performance Analysis (Phase 3)
+                    FToolMenuSection& PerfSection = SubMenu->AddSection("BlueprintPerformanceActions", FText::FromString("Performance Analysis"));
+
+                    PerfSection.AddMenuEntry(
+                        "AnalyzeBlueprintPerformance",
+                        FText::FromString("Analyze Blueprint Performance"),
+                        FText::FromString("Detect performance anti-patterns (Tick-heavy calls, Cast abuse, etc.)"),
+                        FSlateIcon(),
+                        FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteAnalyzeBlueprintPerformance))
+                    );
+
+                    PerfSection.AddMenuEntry(
+                        "ExportPerformanceToJSON",
+                        FText::FromString("Export Performance Report to JSON"),
+                        FText::FromString("Save performance analysis as JSON"),
+                        FSlateIcon(),
+                        FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteExportPerformanceToJSON))
+                    );
+
+                    PerfSection.AddMenuEntry(
+                        "ExportPerformanceToLLMText",
+                        FText::FromString("Export Performance Report to LLM Text"),
+                        FText::FromString("Save performance analysis as LLM-friendly text"),
+                        FSlateIcon(),
+                        FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteExportPerformanceToLLMText))
+                    );
+
+                    // Widget Blueprint Optimization
+                    FToolMenuSection& WidgetSection = SubMenu->AddSection("WidgetAnalyzerActions", FText::FromString("Widget Optimization"));
+
+                    WidgetSection.AddMenuEntry(
+                        "AnalyzeWidgetBlueprint",
+                        FText::FromString("Analyze Widget Blueprint"),
+                        FText::FromString("Analyze widget blueprint for optimization opportunities"),
+                        FSlateIcon(),
+                        FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteAnalyzeWidgetBlueprint))
+                    );
+
+                    WidgetSection.AddMenuEntry(
+                        "ExportWidgetToJSON",
+                        FText::FromString("Export Widget Analysis to JSON"),
+                        FText::FromString("Export widget optimization report to JSON format"),
+                        FSlateIcon(),
+                        FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteExportWidgetToJSON))
+                    );
+
+                    WidgetSection.AddMenuEntry(
+                        "ExportWidgetToLLMText",
+                        FText::FromString("Export Widget Analysis to LLM Text"),
+                        FText::FromString("Export widget optimization report to LLM-friendly text format"),
+                        FSlateIcon(),
+                        FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteExportWidgetToLLMText))
+                    );
+                })
+            );
+        }));
     }
+}
+
+void FBlueprintAnalyzerMenuExtension::RegisterBlueprintEditorToolbarExtension(UToolMenus* ToolMenus)
+{
+    if (!ToolMenus)
+    {
+        return;
+    }
+
+    static const FName BlueprintToolbarMenus[] =
+    {
+        FName(TEXT("AssetEditor.BlueprintEditor.ToolBar.GraphName")),
+        FName(TEXT("AssetEditor.BlueprintEditor.ToolBar.DefaultsName")),
+        FName(TEXT("AssetEditor.BlueprintEditor.ToolBar.ComponentsName")),
+        FName(TEXT("AssetEditor.BlueprintEditor.ToolBar.InterfaceName")),
+        FName(TEXT("AssetEditor.BlueprintEditor.ToolBar.MacroName")),
+        FName(TEXT("AssetEditor.WidgetBlueprintEditor.ToolBar.DesignerName")),
+        FName(TEXT("AssetEditor.WidgetBlueprintEditor.ToolBar.GraphName")),
+        FName(TEXT("AssetEditor.WidgetBlueprintEditor.ToolBar.PreviewName"))
+    };
+
+    for (const FName ToolbarMenuName : BlueprintToolbarMenus)
+    {
+        if (UToolMenu* ToolbarMenu = ToolMenus->ExtendMenu(ToolbarMenuName))
+        {
+            FToolMenuSection& Section = ToolbarMenu->FindOrAddSection("BlueprintAnalyzer");
+            Section.InsertPosition = FToolMenuInsert("SourceControl", EToolMenuInsertType::After);
+            AddBlueprintEditorToolbarButton(Section);
+        }
+    }
+}
+
+void FBlueprintAnalyzerMenuExtension::AddBlueprintEditorToolbarButton(FToolMenuSection& Section)
+{
+    Section.AddDynamicEntry("BlueprintAnalyzerAnalyzeCurrentBlueprint", FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InSection)
+    {
+        const UBlueprintEditorToolMenuContext* Context = InSection.FindContext<UBlueprintEditorToolMenuContext>();
+        UBlueprint* Blueprint = Context ? Context->GetBlueprintObj() : nullptr;
+        if (!Blueprint)
+        {
+            return;
+        }
+
+        const TWeakObjectPtr<UBlueprint> WeakBlueprint(Blueprint);
+        FToolMenuEntry& Entry = InSection.AddEntry(FToolMenuEntry::InitToolBarButton(
+            "BlueprintAnalyzerAnalyzeCurrent",
+            FUIAction(FExecuteAction::CreateLambda([WeakBlueprint]()
+            {
+                if (UBlueprint* CurrentBlueprint = WeakBlueprint.Get())
+                {
+                    FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMTextForBlueprint(CurrentBlueprint);
+                }
+                else
+                {
+                    FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("Blueprint no longer available."), FText::FromString("Blueprint Analyzer"));
+                }
+            })),
+            FText::FromString("Analyze LLM"),
+            FText::FromString("Save an LLM-friendly analysis of this Blueprint in Saved/LLMAnalisys using its asset folder, replacing the previous report"),
+            FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Search")
+        ));
+        Entry.StyleNameOverride = "CalloutToolbar";
+    }));
 }
 
 void FBlueprintAnalyzerMenuExtension::ExecuteAnalyzeBlueprint()
@@ -175,8 +308,23 @@ void FBlueprintAnalyzerMenuExtension::ExecuteAnalyzeBlueprint()
         return;
     }
 
-    FBlueprintAnalysisResult AnalysisResult = UBlueprintAnalyzerLibrary::AnalyzeBlueprint(SelectedBlueprint);
+    ExecuteAnalyzeBlueprintForBlueprint(SelectedBlueprint);
+}
 
+void FBlueprintAnalyzerMenuExtension::ExecuteAnalyzeBlueprintForBlueprint(UBlueprint* Blueprint)
+{
+    if (!Blueprint)
+    {
+        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("No blueprint available."), FText::FromString("Blueprint Analyzer"));
+        return;
+    }
+
+    FBlueprintAnalysisResult AnalysisResult = UBlueprintAnalyzerLibrary::AnalyzeBlueprint(Blueprint);
+    ShowBlueprintAnalysisSummary(AnalysisResult);
+}
+
+void FBlueprintAnalyzerMenuExtension::ShowBlueprintAnalysisSummary(const FBlueprintAnalysisResult& AnalysisResult)
+{
     const FBPAnalyzerMetadata& Meta = AnalysisResult.Metadata;
     FString Message;
     Message += FString::Printf(TEXT("Blueprint '%s' analyzed successfully!\n\n"), *AnalysisResult.BlueprintName);
@@ -224,32 +372,106 @@ void FBlueprintAnalyzerMenuExtension::ExecuteExportToJSON()
     }
 }
 
-void FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMText()
+void FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMTextForAssets(const TArray<FAssetData>& SelectedAssets)
 {
-    UBlueprint* SelectedBlueprint = GetSelectedBlueprint();
-    if (!SelectedBlueprint)
+    if (SelectedAssets.Num() == 1)
     {
-        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("No blueprint selected."), FText::FromString("Blueprint Analyzer"));
+        const TStrongObjectPtr<UBlueprint> Blueprint(Cast<UBlueprint>(SelectedAssets[0].GetAsset()));
+        ExecuteExportToLLMTextForBlueprint(Blueprint.Get());
         return;
     }
 
-    FString DefaultFilename = FString::Printf(TEXT("%s_LLM_Analysis.txt"), *SelectedBlueprint->GetName());
-    FString SavePath = ShowSaveFileDialog(DefaultFilename, TEXT("Text Files (*.txt)|*.txt"));
-    
-    if (!SavePath.IsEmpty())
+    TArray<FAssetData> BlueprintAssets;
+    TSet<FString> SeenAssets;
+    int32 SkippedAssets = 0;
+    for (const FAssetData& Asset : SelectedAssets)
     {
-        FBlueprintAnalysisResult AnalysisResult = UBlueprintAnalyzerLibrary::AnalyzeBlueprint(SelectedBlueprint);
-        bool bSuccess = UBlueprintAnalyzerLibrary::SaveAnalysisToFile(AnalysisResult, SavePath, TEXT("TEXT"));
-        
-        if (bSuccess)
+        if (!Asset.IsInstanceOf(UBlueprint::StaticClass()))
         {
-            FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(FString::Printf(TEXT("LLM-friendly analysis exported to: %s"), *SavePath)));
+            ++SkippedAssets;
+            continue;
         }
-        else
+        const FString AssetPath = Asset.GetObjectPathString();
+        if (!SeenAssets.Contains(AssetPath))
         {
-            FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("Failed to export analysis."), FText::FromString("Blueprint Analyzer"));
+            SeenAssets.Add(AssetPath);
+            BlueprintAssets.Add(Asset);
         }
     }
+    if (BlueprintAssets.IsEmpty())
+    {
+        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("No Blueprints selected."), FText::FromString("Blueprint Analyzer"));
+        return;
+    }
+
+    int32 ExportedFiles = 0;
+    bool bCanceled = false;
+    TArray<FString> FailedAssets;
+    {
+        FScopedSlowTask Progress(BlueprintAssets.Num(), FText::FromString("Exporting one LLM report per selected Blueprint"));
+        Progress.MakeDialog(true);
+        for (int32 Index = 0; Index < BlueprintAssets.Num(); ++Index)
+        {
+            if (Progress.ShouldCancel())
+            {
+                bCanceled = true;
+                break;
+            }
+            const FAssetData& Asset = BlueprintAssets[Index];
+            Progress.EnterProgressFrame(1, FText::FromString(FString::Printf(TEXT("Analyzing %s (%d/%d)"),
+                *Asset.AssetName.ToString(), Index + 1, BlueprintAssets.Num())));
+
+            const TStrongObjectPtr<UBlueprint> Blueprint(Cast<UBlueprint>(Asset.GetAsset()));
+            if (!Blueprint.IsValid())
+            {
+                FailedAssets.Add(Asset.GetObjectPathString() + TEXT(" (failed to load)"));
+                continue;
+            }
+
+            const FBlueprintAnalysisResult Analysis = UBlueprintAnalyzerLibrary::AnalyzeBlueprint(Blueprint.Get());
+            if (Progress.ShouldCancel())
+            {
+                bCanceled = true;
+                break;
+            }
+
+            const FString OutputPath = GetLLMAnalysisPath(Asset.PackagePath.ToString(),
+                Asset.AssetName.ToString() + TEXT("_LLM_Analysis.txt"));
+            if (!SaveLLMTextFile(UBlueprintAnalyzerLibrary::ExportToLLMText(Analysis), OutputPath))
+            {
+                FailedAssets.Add(Asset.GetObjectPathString() + TEXT(" (failed to save: ") + OutputPath + TEXT(")"));
+                continue;
+            }
+            ++ExportedFiles;
+        }
+    }
+
+    FString Message = FString::Printf(TEXT("%s\n\nLLM files exported: %d/%d\nNon-Blueprint assets skipped: %d\nOutput folder: %s"),
+        bCanceled ? TEXT("Batch LLM export canceled. Files already exported are kept.") : TEXT("Batch LLM export finished."),
+        ExportedFiles, BlueprintAssets.Num(), SkippedAssets, *GetLLMAnalysisDirectory());
+    if (!FailedAssets.IsEmpty())
+    {
+        Message += TEXT("\n\nFailed exports:\n") + FString::Join(FailedAssets, TEXT("\n"));
+    }
+    FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Message), FText::FromString("Blueprint Analyzer"));
+}
+
+void FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMTextForBlueprint(UBlueprint* Blueprint)
+{
+    if (!Blueprint)
+    {
+        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("No blueprint available."), FText::FromString("Blueprint Analyzer"));
+        return;
+    }
+
+    const FString SavePath = GetLLMAnalysisPath(FPackageName::GetLongPackagePath(Blueprint->GetOutermost()->GetName()),
+        Blueprint->GetName() + TEXT("_LLM_Analysis.txt"));
+    const FBlueprintAnalysisResult AnalysisResult = UBlueprintAnalyzerLibrary::AnalyzeBlueprint(Blueprint);
+    const bool bSuccess = SaveLLMTextFile(UBlueprintAnalyzerLibrary::ExportToLLMText(AnalysisResult), SavePath);
+
+    FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(bSuccess
+        ? FString::Printf(TEXT("LLM-friendly analysis exported to: %s"), *SavePath)
+        : TEXT("Failed to export analysis.")), FText::FromString("Blueprint Analyzer"));
 }
 
 void FBlueprintAnalyzerMenuExtension::ExecuteAnalyzeWidgetBlueprint()
@@ -359,23 +581,14 @@ void FBlueprintAnalyzerMenuExtension::ExecuteExportWidgetToLLMText()
         return;
     }
 
-    FString DefaultFilename = FString::Printf(TEXT("%s_WidgetOptimization_LLM.txt"), *SelectedBlueprint->GetName());
-    FString SavePath = ShowSaveFileDialog(DefaultFilename, TEXT("Text Files (*.txt)|*.txt"));
-    
-    if (!SavePath.IsEmpty())
-    {
-        FWidgetOptimizationReport Report = UBlueprintAnalyzerLibrary::AnalyzeWidgetBlueprint(SelectedBlueprint);
-        bool bSuccess = UBlueprintAnalyzerLibrary::SaveWidgetAnalysisToFile(Report, SavePath, TEXT("TEXT"));
-        
-        if (bSuccess)
-        {
-            FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(FString::Printf(TEXT("LLM-friendly widget optimization report exported to: %s"), *SavePath)));
-        }
-        else
-        {
-            FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("Failed to export widget analysis."), FText::FromString("Blueprint Analyzer"));
-        }
-    }
+    const FString SavePath = GetLLMAnalysisPath(FPackageName::GetLongPackagePath(SelectedBlueprint->GetOutermost()->GetName()),
+        SelectedBlueprint->GetName() + TEXT("_WidgetOptimization_LLM.txt"));
+    const FWidgetOptimizationReport Report = UBlueprintAnalyzerLibrary::AnalyzeWidgetBlueprint(SelectedBlueprint);
+    const bool bSuccess = SaveLLMTextFile(UBlueprintAnalyzerLibrary::ExportWidgetAnalysisToLLMText(Report), SavePath);
+
+    FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(bSuccess
+        ? FString::Printf(TEXT("LLM-friendly widget optimization report exported to: %s"), *SavePath)
+        : TEXT("Failed to export widget analysis.")), FText::FromString("Blueprint Analyzer"));
 }
 
 //void FBlueprintAnalyzerMenuExtension::ExecuteGenerateOptimizedCode()
@@ -476,13 +689,12 @@ void FBlueprintAnalyzerMenuExtension::ExecuteExportPerformanceToLLMText()
         return;
     }
 
-    FString DefaultFilename = FString::Printf(TEXT("%s_Performance_LLM.txt"), *SelectedBlueprint->GetName());
-    FString SavePath = ShowSaveFileDialog(DefaultFilename, TEXT("Text Files (*.txt)|*.txt"));
-    if (SavePath.IsEmpty()) return;
+    const FString SavePath = GetLLMAnalysisPath(FPackageName::GetLongPackagePath(SelectedBlueprint->GetOutermost()->GetName()),
+        SelectedBlueprint->GetName() + TEXT("_Performance_LLM.txt"));
 
     FBPPerformanceReport Report = UBlueprintAnalyzerLibrary::AnalyzeBlueprintPerformance(SelectedBlueprint);
     const FString Content = UBlueprintAnalyzerLibrary::ExportPerformanceReportToLLMText(Report);
-    const bool bSuccess = FFileHelper::SaveStringToFile(Content, *SavePath);
+    const bool bSuccess = SaveLLMTextFile(Content, SavePath);
 
     FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(bSuccess
         ? FString::Printf(TEXT("LLM-friendly performance report exported to: %s"), *SavePath)
@@ -594,12 +806,11 @@ void FBlueprintAnalyzerMenuExtension::ExecuteExportProjectToLLMText()
         return;
     }
 
-    FString SavePath = ShowSaveFileDialog(TEXT("ProjectAnalysis_LLM.txt"), TEXT("Text Files (*.txt)|*.txt"));
-    if (SavePath.IsEmpty()) return;
+    const FString SavePath = GetLLMAnalysisPath(FolderPath, TEXT("ProjectAnalysis_LLM.txt"));
 
     FBPProjectAnalysis Analysis = UBlueprintAnalyzerLibrary::AnalyzeFolder(FolderPath);
     const FString Content = UBlueprintAnalyzerLibrary::ExportProjectAnalysisToLLMText(Analysis);
-    const bool bSuccess = FFileHelper::SaveStringToFile(Content, *SavePath);
+    const bool bSuccess = SaveLLMTextFile(Content, SavePath);
 
     FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(bSuccess
         ? FString::Printf(TEXT("LLM-friendly project analysis exported to: %s"), *SavePath)

@@ -5,6 +5,12 @@
 #include "CoreMinimal.h"
 #include "Framework/Commands/UIAction.h"
 
+class UBlueprint;
+class UToolMenus;
+struct FAssetData;
+struct FBlueprintAnalysisResult;
+struct FToolMenuSection;
+
 class FBlueprintAnalyzerMenuExtension
 {
 public:
@@ -13,11 +19,15 @@ public:
 
 private:
     static void RegisterMenuExtensions();
+    static void RegisterBlueprintEditorToolbarExtension(UToolMenus* ToolMenus);
+    static void AddBlueprintEditorToolbarButton(FToolMenuSection& Section);
     
     // Original Blueprint Analysis Functions
     static void ExecuteAnalyzeBlueprint();
+    static void ExecuteAnalyzeBlueprintForBlueprint(UBlueprint* Blueprint);
     static void ExecuteExportToJSON();
-    static void ExecuteExportToLLMText();
+    static void ExecuteExportToLLMTextForAssets(const TArray<FAssetData>& SelectedAssets);
+    static void ExecuteExportToLLMTextForBlueprint(UBlueprint* Blueprint);
     
     // New Widget Blueprint Analysis Functions
     static void ExecuteAnalyzeWidgetBlueprint();
@@ -38,6 +48,7 @@ private:
     
     static class UBlueprint* GetSelectedBlueprint();
     static bool IsWidgetBlueprint(UBlueprint* Blueprint);
+    static void ShowBlueprintAnalysisSummary(const FBlueprintAnalysisResult& AnalysisResult);
     
     static FString ShowSaveFileDialog(const FString& DefaultFilename, const FString& FileTypes);
 };

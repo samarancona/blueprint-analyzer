@@ -48,6 +48,8 @@ A comprehensive Unreal Engine 5 editor plugin that performs deep structural anal
 
 ### 🔧 Editor Integration
 - **Right-click on any Blueprint**: full per-asset analysis menus
+- **Multi-select Blueprints**: export a separate LLM text file for every selected Blueprint
+- **Automatic LLM Exports**: save reports under the project's `Saved/LLMAnalisys`, preserving Unreal package folders and overwriting previous reports
 - **Right-click on any Content Browser folder**: batch project analysis
 - **Non-destructive**: never modifies your Blueprints
 - **Editor-only**: no runtime dependencies, no packaged-game overhead
@@ -71,7 +73,19 @@ A comprehensive Unreal Engine 5 editor plugin that performs deep structural anal
 #### Export for AI / Programmatic Use
 1. Select a Blueprint → Right-click → **Blueprint Analyzer**
 2. Choose **Export to JSON** (programmatic) or **Export to LLM Text** (AI-friendly)
-3. Paste result into ChatGPT / Claude for code review, C++ migration, documentation, bug hunting
+3. LLM text saves automatically; JSON opens a save-file dialog
+4. Paste result into ChatGPT / Claude for code review, C++ migration, documentation, bug hunting
+
+All LLM text exports use the project's `Saved/LLMAnalisys` folder, which is created automatically. Reports preserve the logical Unreal package path: `/Game/Characters/BP_Player` exports to `Saved/LLMAnalisys/Game/Characters/BP_Player_LLM_Analysis.txt`. Existing reports are always overwritten, with no folder picker, save-file dialog, or overwrite confirmation. The Blueprint editor's **Analyze LLM** toolbar button uses the same destination.
+
+### Multiple Blueprint LLM Exports
+1. Select multiple Blueprints in the Content Browser (Ctrl-click or Shift-click), including Widget and Animation Blueprints if needed
+2. Right-click → **Blueprint Analyzer** → **Analyze Selected Blueprints for LLM**
+3. Each Blueprint automatically gets its own `<AssetName>_LLM_Analysis.txt` under `Saved/LLMAnalisys`, with the same complete analysis as a single-asset export
+4. Unreal package folders are preserved, so assets with the same name in different folders stay separate
+5. Review the final counts of exported files, skipped non-Blueprint assets, and any failures
+
+Widget optimization, Blueprint performance, and folder LLM reports also save automatically under `Saved/LLMAnalisys`, preserving their source package folders and distinct report filenames. JSON exports continue to use a save-file dialog.
 
 ### Blueprint Performance Audit
 1. Right-click any Blueprint → **Performance Analysis** → **Analyze Blueprint Performance**
