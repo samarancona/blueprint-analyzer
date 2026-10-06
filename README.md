@@ -41,6 +41,7 @@ A comprehensive Unreal Engine 5 editor plugin that performs deep structural anal
 
 ### 📁 Project-Level Batch Analysis
 - **Folder Analysis**: Right-click any Content Browser folder → analyze every Blueprint inside
+- **Recursive Folder LLM Exports**: Select one or more folders to export a separate LLM text file for every Blueprint in their subfolders, including Widget and Animation Blueprints, with no duplicate exports for overlapping selections
 - **Aggregate Report**: Total nodes, average performance score, top 10 worst offenders sorted by score
 - **Dependency Graph**: Extract Spawn / Cast / Call / HardRef references between Blueprints
 - **Circular Dependency Detection**: Automated cycle discovery across the project
@@ -86,6 +87,13 @@ All LLM text exports use the project's `Saved/LLMAnalisys` folder, which is crea
 5. Review the final counts of exported files, skipped non-Blueprint assets, and any failures
 
 Widget optimization, Blueprint performance, and folder LLM reports also save automatically under `Saved/LLMAnalisys`, preserving their source package folders and distinct report filenames. JSON exports continue to use a save-file dialog.
+
+### Folder Blueprint LLM Exports
+1. Select one or more folders in the Content Browser
+2. Right-click → **Blueprint Analyzer** → **Analyze Blueprints in Selected Folders for LLM**
+3. Every Blueprint in the selected folders and all subfolders gets its own `<AssetName>_LLM_Analysis.txt` under `Saved/LLMAnalisys`, preserving its logical Unreal package path and automatically overwriting existing reports
+
+This includes all Blueprint subclasses, such as Widget and Animation Blueprints. Selecting both a parent folder and its subfolders exports each asset only once. **Analyze Folder** and the aggregate project reports remain available separately.
 
 ### Blueprint Performance Audit
 1. Right-click any Blueprint → **Performance Analysis** → **Analyze Blueprint Performance**

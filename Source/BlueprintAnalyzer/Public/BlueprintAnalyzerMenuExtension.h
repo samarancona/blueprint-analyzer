@@ -41,6 +41,7 @@ private:
     static void ExecuteExportPerformanceToLLMText();
 
     // Phase 4: Project Folder Analysis
+    static void ExecuteExportFolderBlueprintsToLLMText(const TArray<FString>& FolderPaths);
     static void ExecuteAnalyzeFolder();
     static void ExecuteExportProjectToJSON();
     static void ExecuteExportProjectToLLMText();

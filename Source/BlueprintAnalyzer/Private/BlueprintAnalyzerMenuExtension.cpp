@@ -6,6 +6,7 @@
 #include "Engine/Blueprint.h"
 #include "Blueprint/UserWidget.h"
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "ContentBrowserModule.h"
 #include "ContentBrowserMenuContexts.h"
 #include "IContentBrowserSingleton.h"
@@ -79,9 +80,29 @@ void FBlueprintAnalyzerMenuExtension::RegisterMenuExtensions()
         FolderSection.AddSubMenu(
             "BlueprintAnalyzerFolder",
             FText::FromString("Blueprint Analyzer"),
-            FText::FromString("Analyze all Blueprints in this folder"),
+            FText::FromString("Analyze Blueprints in the selected folders"),
             FNewToolMenuDelegate::CreateLambda([](UToolMenu* SubMenu)
             {
+                const UContentBrowserFolderContext* FolderContext = SubMenu->FindContext<UContentBrowserFolderContext>();
+                const TArray<FString> FolderPaths = FolderContext ? FolderContext->GetSelectedPackagePaths() : TArray<FString>();
+                FToolMenuSection& ExportSection = SubMenu->AddSection("FolderBlueprintLLMExports", FText::FromString("Blueprint LLM Exports"));
+                ExportSection.AddMenuEntry(
+                    "ExportFolderBlueprintsToLLMText",
+                    FText::FromString("Analyze Blueprints in Selected Folders for LLM"),
+                    FText::FromString("Recursively export one LLM report per Blueprint in all selected folders to Saved/LLMAnalisys, replacing previous reports."),
+                    FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Search"),
+                    FUIAction(FExecuteAction::CreateLambda([FolderPaths]()
+                    {
+                        FBlueprintAnalyzerMenuExtension::ExecuteExportFolderBlueprintsToLLMText(FolderPaths);
+                    }), FCanExecuteAction::CreateLambda([FolderPaths]()
+                    {
+                        return FolderPaths.ContainsByPredicate([](const FString& Path)
+                        {
+                            return FPackageName::IsValidLongPackageName(Path + TEXT("/LLMAnalysis"), true);
+                        });
+                    }))
+                );
+
                 FToolMenuSection& ProjectSection = SubMenu->AddSection("ProjectAnalysis", FText::FromString("Project Analysis"));
                 ProjectSection.AddMenuEntry(
                     "AnalyzeFolder",
@@ -704,6 +725,62 @@ void FBlueprintAnalyzerMenuExtension::ExecuteExportPerformanceToLLMText()
 // ============================================================
 // Phase 4: Folder Analysis Execute Functions
 // ============================================================
+
+void FBlueprintAnalyzerMenuExtension::ExecuteExportFolderBlueprintsToLLMText(const TArray<FString>& FolderPaths)
+{
+    FARFilter Filter;
+    Filter.bRecursivePaths = true;
+    Filter.bRecursiveClasses = true;
+    Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+
+    TArray<FString> ValidFolderPaths;
+    for (const FString& FolderPath : FolderPaths)
+    {
+        if (FPackageName::IsValidLongPackageName(FolderPath + TEXT("/LLMAnalysis"), true))
+        {
+            Filter.PackagePaths.AddUnique(FName(*FolderPath));
+            ValidFolderPaths.AddUnique(FolderPath);
+        }
+    }
+    if (ValidFolderPaths.IsEmpty())
+    {
+        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("No asset folders selected."), FText::FromString("Blueprint Analyzer"));
+        return;
+    }
+
+    FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+    IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+    TArray<FAssetData> BlueprintAssets;
+    bool bQuerySucceeded = false;
+    {
+        FScopedSlowTask Progress(1, FText::FromString("Finding Blueprints in the selected folders and subfolders"));
+        Progress.MakeDialog(true);
+        Progress.EnterProgressFrame(1);
+        if (Progress.ShouldCancel()) return;
+
+        // Finish discovery in these paths even if the editor's initial registry scan is still running.
+        AssetRegistry.ScanPathsSynchronous(ValidFolderPaths, false);
+        if (Progress.ShouldCancel()) return;
+        bQuerySucceeded = AssetRegistry.GetAssets(Filter, BlueprintAssets);
+        if (Progress.ShouldCancel()) return;
+    }
+    if (!bQuerySucceeded)
+    {
+        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("Failed to find Blueprints in the selected folders."), FText::FromString("Blueprint Analyzer"));
+        return;
+    }
+    if (BlueprintAssets.IsEmpty())
+    {
+        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("No Blueprints found in the selected folders or subfolders."), FText::FromString("Blueprint Analyzer"));
+        return;
+    }
+
+    BlueprintAssets.Sort([](const FAssetData& A, const FAssetData& B)
+    {
+        return A.GetObjectPathString() < B.GetObjectPathString();
+    });
+    ExecuteExportToLLMTextForAssets(BlueprintAssets);
+}
 
 FString FBlueprintAnalyzerMenuExtension::GetSelectedFolderPath()
 {
