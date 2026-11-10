@@ -95,14 +95,14 @@ namespace NiagaraReportText
     {
         for (const auto& Field : Object.Values)
         {
-            const FString& Key = Field.Key;
+            const FString Key(*Field.Key);
             const FValue& Value = Field.Value;
             if (Key == TEXT("ScriptDefinitions") && Value->Type == EJson::Object)
             {
                 Out += TEXT("\n## Referenced script definitions\n");
                 for (const auto& Definition : Value->AsObject()->Values)
                 {
-                    Out += TEXT("\n### ") + Definition.Key + TEXT("\n");
+                    Out += FString::Printf(TEXT("\n### %s\n"), *Definition.Key);
                     if (Definition.Value->Type == EJson::Object)
                     {
                         AppendFields(*Definition.Value->AsObject(), Out, 3);

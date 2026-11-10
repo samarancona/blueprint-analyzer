@@ -9,6 +9,7 @@
 #include "NiagaraEmitterHandle.h"
 #include "NiagaraRendererProperties.h"
 #include "NiagaraScript.h"
+#include "NiagaraScriptRuntimeData.h"
 #include "NiagaraSimulationStageBase.h"
 #include "NiagaraSystem.h"
 #include "UObject/UnrealType.h"
@@ -90,35 +91,41 @@ FJsonItems ReadUserParameters(const FNiagaraUserRedirectionParameterStore& Store
     return Result;
 }
 
-void AppendScript(FJsonItems& Scripts, UNiagaraScript* Script, const FString& EmitterName,
-    TSharedRef<FJsonObject> Definitions)
+void AppendScript(FJsonItems& Scripts, UNiagaraScript* Script, const UNiagaraSystem& System,
+    const FNiagaraEmitterHandle* EmitterHandle, TSharedRef<FJsonObject> Definitions)
 {
     if (!IsValid(Script)) return;
     auto Json = MakeShared<FJsonObject>();
     Json->SetStringField(TEXT("Usage"), StaticEnum<ENiagaraScriptUsage>()->GetNameStringByValue(int64(Script->GetUsage())));
     Json->SetStringField(TEXT("UsageId"), Script->GetUsageId().ToString());
     Json->SetStringField(TEXT("Path"), Script->GetPathName());
-    AddNiagaraScriptAnalysis(Json, Script, EmitterName, Definitions);
+    AddNiagaraScriptAnalysis(Json, Script,
+        EmitterHandle ? EmitterHandle->GetUniqueInstanceName() : FString(), Definitions);
     FJsonItems Interfaces;
-    for (const FNiagaraScriptResolvedDataInterfaceInfo& Info : Script->GetResolvedDataInterfaces())
+    const TSharedPtr<const FNiagaraScriptRuntimeData> RuntimeData =
+        System.GetScriptRuntimeData(EmitterHandle, *Script);
+    if (RuntimeData.IsValid())
     {
-        auto Binding = MakeShared<FJsonObject>();
-        Binding->SetStringField(TEXT("Name"), Info.Name.ToString());
-        Binding->SetStringField(TEXT("SourceEmitter"), Info.ResolvedSourceEmitterName);
-        Binding->SetStringField(TEXT("Variable"), Info.ResolvedVariable.GetName().ToString());
-        if (IsValid(Info.ResolvedDataInterface))
+        for (const FNiagaraScriptResolvedDataInterfaceInfo& Info : RuntimeData->GetResolvedDataInterfaces())
         {
-            Binding->SetStringField(TEXT("Class"), Info.ResolvedDataInterface->GetClass()->GetPathName());
-            Binding->SetStringField(TEXT("Path"), Info.ResolvedDataInterface->GetPathName());
+            auto Binding = MakeShared<FJsonObject>();
+            Binding->SetStringField(TEXT("Name"), Info.Name.ToString());
+            Binding->SetStringField(TEXT("SourceEmitter"), Info.ResolvedSourceEmitterName);
+            Binding->SetStringField(TEXT("Variable"), Info.ResolvedVariable.GetName().ToString());
+            if (IsValid(Info.ResolvedDataInterface))
+            {
+                Binding->SetStringField(TEXT("Class"), Info.ResolvedDataInterface->GetClass()->GetPathName());
+                Binding->SetStringField(TEXT("Path"), Info.ResolvedDataInterface->GetPathName());
+            }
+            Interfaces.Add(MakeShared<FJsonValueObject>(Binding));
         }
-        Interfaces.Add(MakeShared<FJsonValueObject>(Binding));
     }
     if (!Interfaces.IsEmpty()) Json->SetArrayField(TEXT("LastCompiledDataInterfaceBindings"), Interfaces);
     Scripts.Add(MakeShared<FJsonValueObject>(Json));
 }
 
 void DescribeStandardEmitter(TSharedRef<FJsonObject> Json, FVersionedNiagaraEmitterData& Data,
-    const FString& EmitterName, TSharedRef<FJsonObject> Definitions)
+    const UNiagaraSystem& System, const FNiagaraEmitterHandle& Handle, TSharedRef<FJsonObject> Definitions)
 {
     Json->SetStringField(TEXT("VersionGuid"), Data.Version.VersionGuid.ToString());
     Json->SetStringField(TEXT("Version"), FString::Printf(TEXT("%d.%d"), Data.Version.MajorVersion, Data.Version.MinorVersion));
@@ -173,7 +180,7 @@ void DescribeStandardEmitter(TSharedRef<FJsonObject> Json, FVersionedNiagaraEmit
         // A GPU compute script combines existing source stages. It has no authored module stack.
         if (Script && Script->GetUsage() != ENiagaraScriptUsage::ParticleGPUComputeScript)
         {
-            AppendScript(Scripts, Script, EmitterName, Definitions);
+            AppendScript(Scripts, Script, System, &Handle, Definitions);
         }
     }
     Json->SetArrayField(TEXT("Scripts"), Scripts);
@@ -220,7 +227,8 @@ void DescribeLightweightEmitter(TSharedRef<FJsonObject> Json, const UObject* Emi
     Json->SetArrayField(TEXT("Modules"), Modules);
 }
 
-TSharedRef<FJsonObject> DescribeEmitter(const FNiagaraEmitterHandle& Handle, TSharedRef<FJsonObject> Definitions)
+TSharedRef<FJsonObject> DescribeEmitter(const UNiagaraSystem& System, const FNiagaraEmitterHandle& Handle,
+    TSharedRef<FJsonObject> Definitions)
 {
     auto Json = MakeShared<FJsonObject>();
     const FString Name = Handle.GetName().ToString();
@@ -264,7 +272,7 @@ TSharedRef<FJsonObject> DescribeEmitter(const FNiagaraEmitterHandle& Handle, TSh
     {
         if (FVersionedNiagaraEmitterData* Data = Handle.GetEmitterData())
         {
-            DescribeStandardEmitter(Json, *Data, Handle.GetUniqueInstanceName(), Definitions);
+            DescribeStandardEmitter(Json, *Data, System, Handle, Definitions);
             for (int32 Index = 0; Index < Data->GetRenderers().Num(); ++Index)
             {
                 AddRenderer(Data->GetRenderers()[Index], Index);
@@ -306,14 +314,14 @@ TSharedPtr<FJsonObject> FNiagaraAnalyzer::Analyze(UNiagaraSystem* System)
     Json->SetArrayField(TEXT("UserParameters"), ReadUserParameters(System->GetExposedParameters()));
     auto Definitions = MakeShared<FJsonObject>();
     FJsonItems Scripts;
-    AppendScript(Scripts, System->GetSystemSpawnScript(), FString(), Definitions);
-    AppendScript(Scripts, System->GetSystemUpdateScript(), FString(), Definitions);
+    AppendScript(Scripts, System->GetSystemSpawnScript(), *System, nullptr, Definitions);
+    AppendScript(Scripts, System->GetSystemUpdateScript(), *System, nullptr, Definitions);
     Json->SetArrayField(TEXT("Scripts"), Scripts);
 
     FJsonItems Emitters;
     for (const FNiagaraEmitterHandle& Handle : System->GetEmitterHandles())
     {
-        Emitters.Add(MakeShared<FJsonValueObject>(DescribeEmitter(Handle, Definitions)));
+        Emitters.Add(MakeShared<FJsonValueObject>(DescribeEmitter(*System, Handle, Definitions)));
     }
     Json->SetArrayField(TEXT("Emitters"), Emitters);
     Json->SetObjectField(TEXT("ScriptDefinitions"), Definitions);
