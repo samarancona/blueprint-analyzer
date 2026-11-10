@@ -3,7 +3,7 @@
 	"Version": 2,
 	"VersionName": "1.1.3",
 	"FriendlyName": "Blueprint Analyzer",
-	"Description": "Analyze and export Blueprint structures to LLM-friendly formats (JSON/Text). Reduces blueprint data by 80-90% by removing visual layout information while preserving logic flow. Perfect for AI-assisted blueprint analysis. Free for all users.",
+	"Description": "Analyze Blueprints and Niagara Systems in the editor and export their authored logic as text or JSON for AI-assisted review.",
 	"Category": "Developer Tools",
 	"CreatedBy": "keemminxu",
 	"CreatedByURL": "https://keemminxu.com",
@@ -15,6 +15,9 @@
 	"IsBetaVersion": false,
 	"IsExperimentalVersion": false,
 	"Installed": false,
+	"Plugins": [
+		{ "Name": "Niagara", "Enabled": true }
+	],
 	"Modules": [
 		{
 			"Name": "BlueprintAnalyzer",

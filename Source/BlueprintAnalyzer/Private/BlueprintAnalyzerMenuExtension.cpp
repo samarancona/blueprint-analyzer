@@ -2,6 +2,7 @@
 
 #include "BlueprintAnalyzerMenuExtension.h"
 #include "BlueprintAnalyzerLibrary.h"
+#include "NiagaraSystem.h"
 #include "BlueprintEditorContext.h"
 #include "Engine/Blueprint.h"
 #include "Blueprint/UserWidget.h"
@@ -14,6 +15,7 @@
 #include "ContentBrowserDataSubsystem.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "ToolMenus.h"
+#include "Toolkits/AssetEditorToolkitMenuContext.h"
 #include "Misc/MessageDialog.h"
 #include "DesktopPlatformModule.h"
 #include "Framework/Application/SlateApplication.h"
@@ -29,6 +31,24 @@
 
 namespace
 {
+    bool IsSupportedAsset(const FAssetData& Asset)
+    {
+        return Asset.IsInstanceOf(UBlueprint::StaticClass()) || Asset.IsInstanceOf(UNiagaraSystem::StaticClass());
+    }
+
+    FString BuildLLMReport(UObject* Asset)
+    {
+        if (UBlueprint* Blueprint = Cast<UBlueprint>(Asset))
+        {
+            return UBlueprintAnalyzerLibrary::ExportToLLMText(UBlueprintAnalyzerLibrary::AnalyzeBlueprint(Blueprint));
+        }
+        if (UNiagaraSystem* System = Cast<UNiagaraSystem>(Asset))
+        {
+            return UBlueprintAnalyzerLibrary::ExportNiagaraSystemToLLMText(System);
+        }
+        return FString();
+    }
+
     FString GetLLMAnalysisDirectory()
     {
         return FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("LLMAnalisys")));
@@ -71,7 +91,7 @@ void FBlueprintAnalyzerMenuExtension::RegisterMenuExtensions()
         return;
     }
 
-    RegisterBlueprintEditorToolbarExtension(ToolMenus);
+    RegisterAssetEditorToolbarExtension(ToolMenus);
 
     // Folder context menu (Phase 4: batch analyze)
     if (UToolMenu* FolderMenu = ToolMenus->ExtendMenu("ContentBrowser.FolderContextMenu"))
@@ -80,20 +100,20 @@ void FBlueprintAnalyzerMenuExtension::RegisterMenuExtensions()
         FolderSection.AddSubMenu(
             "BlueprintAnalyzerFolder",
             FText::FromString("Blueprint Analyzer"),
-            FText::FromString("Analyze Blueprints in the selected folders"),
+            FText::FromString("Analyze Blueprints and Niagara Systems in the selected folders"),
             FNewToolMenuDelegate::CreateLambda([](UToolMenu* SubMenu)
             {
                 const UContentBrowserFolderContext* FolderContext = SubMenu->FindContext<UContentBrowserFolderContext>();
                 const TArray<FString> FolderPaths = FolderContext ? FolderContext->GetSelectedPackagePaths() : TArray<FString>();
-                FToolMenuSection& ExportSection = SubMenu->AddSection("FolderBlueprintLLMExports", FText::FromString("Blueprint LLM Exports"));
+                FToolMenuSection& ExportSection = SubMenu->AddSection("FolderBlueprintLLMExports", FText::FromString("LLM Exports"));
                 ExportSection.AddMenuEntry(
                     "ExportFolderBlueprintsToLLMText",
-                    FText::FromString("Analyze Blueprints in Selected Folders for LLM"),
-                    FText::FromString("Recursively export one LLM report per Blueprint in all selected folders to Saved/LLMAnalisys, replacing previous reports."),
+                    FText::FromString("Analyze Blueprints and Niagara Systems in Selected Folders for LLM"),
+                    FText::FromString("Recursively export one LLM report per Blueprint or Niagara System in all selected folders to Saved/LLMAnalisys, replacing previous reports."),
                     FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Search"),
                     FUIAction(FExecuteAction::CreateLambda([FolderPaths]()
                     {
-                        FBlueprintAnalyzerMenuExtension::ExecuteExportFolderBlueprintsToLLMText(FolderPaths);
+                        FBlueprintAnalyzerMenuExtension::ExecuteExportFolderAssetsToLLMText(FolderPaths);
                     }), FCanExecuteAction::CreateLambda([FolderPaths]()
                     {
                         return FolderPaths.ContainsByPredicate([](const FString& Path)
@@ -103,7 +123,7 @@ void FBlueprintAnalyzerMenuExtension::RegisterMenuExtensions()
                     }))
                 );
 
-                FToolMenuSection& ProjectSection = SubMenu->AddSection("ProjectAnalysis", FText::FromString("Project Analysis"));
+                FToolMenuSection& ProjectSection = SubMenu->AddSection("ProjectAnalysis", FText::FromString("Project Analysis (Blueprints Only)"));
                 ProjectSection.AddMenuEntry(
                     "AnalyzeFolder",
                     FText::FromString("Analyze Folder"),
@@ -137,10 +157,7 @@ void FBlueprintAnalyzerMenuExtension::RegisterMenuExtensions()
         Section.AddDynamicEntry("BlueprintAnalyzerSelection", FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InSection)
         {
             const UContentBrowserAssetContextMenuContext* Context = InSection.FindContext<UContentBrowserAssetContextMenuContext>();
-            if (!Context || !Context->SelectedAssets.ContainsByPredicate([](const FAssetData& Asset)
-            {
-                return Asset.IsInstanceOf(UBlueprint::StaticClass());
-            }))
+            if (!Context || !Context->SelectedAssets.ContainsByPredicate(IsSupportedAsset))
             {
                 return;
             }
@@ -150,7 +167,7 @@ void FBlueprintAnalyzerMenuExtension::RegisterMenuExtensions()
             InSection.AddSubMenu(
                 "BlueprintAnalyzer",
                 FText::FromString("Blueprint Analyzer"),
-                FText::FromString("Blueprint analysis and optimization tools"),
+                FText::FromString("Analyze Blueprints and Niagara Systems"),
                 FNewToolMenuDelegate::CreateLambda([SelectedAssets](UToolMenu* SubMenu)
                 {
                     FToolMenuSection& SubSection = SubMenu->AddSection("BlueprintAnalyzerActions", FText::FromString("Analysis Actions"));
@@ -159,8 +176,8 @@ void FBlueprintAnalyzerMenuExtension::RegisterMenuExtensions()
                     {
                         SubSection.AddMenuEntry(
                             "AnalyzeSelectedBlueprintsForLLM",
-                            FText::FromString("Analyze Selected Blueprints for LLM"),
-                            FText::FromString("Save a separate LLM text file per selected Blueprint in Saved/LLMAnalisys, preserving asset folders and replacing previous reports."),
+                            FText::FromString("Analyze Selected Blueprints and Niagara Systems for LLM"),
+                            FText::FromString("Save one LLM text file per selected Blueprint or Niagara System in Saved/LLMAnalisys, preserving asset folders and replacing previous reports."),
                             FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Search"),
                             FUIAction(FExecuteAction::CreateLambda([SelectedAssets]()
                             {
@@ -170,33 +187,54 @@ void FBlueprintAnalyzerMenuExtension::RegisterMenuExtensions()
                         return;
                     }
 
-                    // Regular Blueprint Analysis
-                    SubSection.AddMenuEntry(
-                        "AnalyzeBlueprint",
-                        FText::FromString("Analyze Blueprint"),
-                        FText::FromString("Analyze the selected blueprint structure"),
-                        FSlateIcon(),
-                        FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteAnalyzeBlueprint))
-                    );
+                    const bool bNiagaraSystem = SelectedAssets[0].IsInstanceOf(UNiagaraSystem::StaticClass());
+                    if (bNiagaraSystem)
+                    {
+                        SubSection.AddMenuEntry(
+                            "ExportNiagaraToJSON",
+                            FText::FromString("Export Niagara System to JSON"),
+                            FText::FromString("Save the Niagara System analysis as JSON"),
+                            FSlateIcon(),
+                            FUIAction(FExecuteAction::CreateLambda([Asset = SelectedAssets[0]]()
+                            {
+                                FBlueprintAnalyzerMenuExtension::ExecuteExportNiagaraToJSON(Asset);
+                            }))
+                        );
+                    }
+                    else
+                    {
+                        SubSection.AddMenuEntry(
+                            "AnalyzeBlueprint",
+                            FText::FromString("Analyze Blueprint"),
+                            FText::FromString("Analyze the selected blueprint structure"),
+                            FSlateIcon(),
+                            FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteAnalyzeBlueprint))
+                        );
 
-                    SubSection.AddMenuEntry(
-                        "ExportToJSON",
-                        FText::FromString("Export to JSON"),
-                        FText::FromString("Export blueprint analysis to JSON format"),
-                        FSlateIcon(),
-                        FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteExportToJSON))
-                    );
+                        SubSection.AddMenuEntry(
+                            "ExportToJSON",
+                            FText::FromString("Export to JSON"),
+                            FText::FromString("Export blueprint analysis to JSON format"),
+                            FSlateIcon(),
+                            FUIAction(FExecuteAction::CreateStatic(&FBlueprintAnalyzerMenuExtension::ExecuteExportToJSON))
+                        );
+                    }
 
                     SubSection.AddMenuEntry(
                         "ExportToLLMText",
                         FText::FromString("Export to LLM Text"),
-                        FText::FromString("Save blueprint analysis in Saved/LLMAnalisys using its asset folder, replacing the previous report"),
+                        FText::FromString("Save analysis in Saved/LLMAnalisys using the asset folder, replacing the previous report"),
                         FSlateIcon(),
                         FUIAction(FExecuteAction::CreateLambda([SelectedAssets]()
                         {
                             FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMTextForAssets(SelectedAssets);
                         }))
                     );
+
+                    if (bNiagaraSystem)
+                    {
+                        return;
+                    }
 
                     // Blueprint Performance Analysis (Phase 3)
                     FToolMenuSection& PerfSection = SubMenu->AddSection("BlueprintPerformanceActions", FText::FromString("Performance Analysis"));
@@ -257,14 +295,14 @@ void FBlueprintAnalyzerMenuExtension::RegisterMenuExtensions()
     }
 }
 
-void FBlueprintAnalyzerMenuExtension::RegisterBlueprintEditorToolbarExtension(UToolMenus* ToolMenus)
+void FBlueprintAnalyzerMenuExtension::RegisterAssetEditorToolbarExtension(UToolMenus* ToolMenus)
 {
     if (!ToolMenus)
     {
         return;
     }
 
-    static const FName BlueprintToolbarMenus[] =
+    static const FName ToolbarMenus[] =
     {
         FName(TEXT("AssetEditor.BlueprintEditor.ToolBar.GraphName")),
         FName(TEXT("AssetEditor.BlueprintEditor.ToolBar.DefaultsName")),
@@ -273,47 +311,54 @@ void FBlueprintAnalyzerMenuExtension::RegisterBlueprintEditorToolbarExtension(UT
         FName(TEXT("AssetEditor.BlueprintEditor.ToolBar.MacroName")),
         FName(TEXT("AssetEditor.WidgetBlueprintEditor.ToolBar.DesignerName")),
         FName(TEXT("AssetEditor.WidgetBlueprintEditor.ToolBar.GraphName")),
-        FName(TEXT("AssetEditor.WidgetBlueprintEditor.ToolBar.PreviewName"))
+        FName(TEXT("AssetEditor.WidgetBlueprintEditor.ToolBar.PreviewName")),
+        FName(TEXT("AssetEditor.Niagara.ToolBar.Default")),
+        FName(TEXT("AssetEditor.Niagara.ToolBar.Scalability"))
     };
 
-    for (const FName ToolbarMenuName : BlueprintToolbarMenus)
+    for (const FName ToolbarMenuName : ToolbarMenus)
     {
         if (UToolMenu* ToolbarMenu = ToolMenus->ExtendMenu(ToolbarMenuName))
         {
             FToolMenuSection& Section = ToolbarMenu->FindOrAddSection("BlueprintAnalyzer");
             Section.InsertPosition = FToolMenuInsert("SourceControl", EToolMenuInsertType::After);
-            AddBlueprintEditorToolbarButton(Section);
+            AddAssetEditorToolbarButton(Section);
         }
     }
 }
 
-void FBlueprintAnalyzerMenuExtension::AddBlueprintEditorToolbarButton(FToolMenuSection& Section)
+void FBlueprintAnalyzerMenuExtension::AddAssetEditorToolbarButton(FToolMenuSection& Section)
 {
     Section.AddDynamicEntry("BlueprintAnalyzerAnalyzeCurrentBlueprint", FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InSection)
     {
-        const UBlueprintEditorToolMenuContext* Context = InSection.FindContext<UBlueprintEditorToolMenuContext>();
-        UBlueprint* Blueprint = Context ? Context->GetBlueprintObj() : nullptr;
-        if (!Blueprint)
+        UObject* Asset = nullptr;
+        if (const UBlueprintEditorToolMenuContext* Context = InSection.FindContext<UBlueprintEditorToolMenuContext>())
+        {
+            Asset = Context->GetBlueprintObj();
+        }
+        else if (const UAssetEditorToolkitMenuContext* Toolkit = InSection.FindContext<UAssetEditorToolkitMenuContext>())
+        {
+            // Niagara also uses this toolkit for standalone emitters. Only export an actual System asset.
+            const TArray<UObject*> EditingObjects = Toolkit->GetEditingObjects();
+            if (EditingObjects.Num() == 1)
+            {
+                Asset = Cast<UNiagaraSystem>(EditingObjects[0]);
+            }
+        }
+        if (!Asset)
         {
             return;
         }
 
-        const TWeakObjectPtr<UBlueprint> WeakBlueprint(Blueprint);
+        const TWeakObjectPtr<UObject> WeakAsset(Asset);
         FToolMenuEntry& Entry = InSection.AddEntry(FToolMenuEntry::InitToolBarButton(
             "BlueprintAnalyzerAnalyzeCurrent",
-            FUIAction(FExecuteAction::CreateLambda([WeakBlueprint]()
+            FUIAction(FExecuteAction::CreateLambda([WeakAsset]()
             {
-                if (UBlueprint* CurrentBlueprint = WeakBlueprint.Get())
-                {
-                    FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMTextForBlueprint(CurrentBlueprint);
-                }
-                else
-                {
-                    FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("Blueprint no longer available."), FText::FromString("Blueprint Analyzer"));
-                }
+                FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMTextForAsset(WeakAsset.Get());
             })),
             FText::FromString("Analyze LLM"),
-            FText::FromString("Save an LLM-friendly analysis of this Blueprint in Saved/LLMAnalisys using its asset folder, replacing the previous report"),
+            FText::FromString("Save an LLM-friendly analysis in Saved/LLMAnalisys using the asset folder, replacing the previous report"),
             FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Search")
         ));
         Entry.StyleNameOverride = "CalloutToolbar";
@@ -393,21 +438,34 @@ void FBlueprintAnalyzerMenuExtension::ExecuteExportToJSON()
     }
 }
 
+void FBlueprintAnalyzerMenuExtension::ExecuteExportNiagaraToJSON(const FAssetData& Asset)
+{
+    const FString SavePath = ShowSaveFileDialog(Asset.AssetName.ToString() + TEXT("_Analysis.json"), TEXT("JSON Files (*.json)|*.json"));
+    if (SavePath.IsEmpty()) return;
+
+    const TStrongObjectPtr<UNiagaraSystem> System(Cast<UNiagaraSystem>(Asset.GetAsset()));
+    const FString Report = UBlueprintAnalyzerLibrary::ExportNiagaraSystemToJSON(System.Get());
+    const bool bSuccess = !Report.IsEmpty() && FFileHelper::SaveStringToFile(Report, *SavePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+    FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(bSuccess
+        ? FString::Printf(TEXT("Analysis exported to: %s"), *SavePath)
+        : TEXT("Failed to export Niagara System analysis.")), FText::FromString("Blueprint Analyzer"));
+}
+
 void FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMTextForAssets(const TArray<FAssetData>& SelectedAssets)
 {
     if (SelectedAssets.Num() == 1)
     {
-        const TStrongObjectPtr<UBlueprint> Blueprint(Cast<UBlueprint>(SelectedAssets[0].GetAsset()));
-        ExecuteExportToLLMTextForBlueprint(Blueprint.Get());
+        const TStrongObjectPtr<UObject> Asset(SelectedAssets[0].GetAsset());
+        ExecuteExportToLLMTextForAsset(Asset.Get());
         return;
     }
 
-    TArray<FAssetData> BlueprintAssets;
+    TArray<FAssetData> SupportedAssets;
     TSet<FString> SeenAssets;
     int32 SkippedAssets = 0;
     for (const FAssetData& Asset : SelectedAssets)
     {
-        if (!Asset.IsInstanceOf(UBlueprint::StaticClass()))
+        if (!IsSupportedAsset(Asset))
         {
             ++SkippedAssets;
             continue;
@@ -416,12 +474,12 @@ void FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMTextForAssets(const TArr
         if (!SeenAssets.Contains(AssetPath))
         {
             SeenAssets.Add(AssetPath);
-            BlueprintAssets.Add(Asset);
+            SupportedAssets.Add(Asset);
         }
     }
-    if (BlueprintAssets.IsEmpty())
+    if (SupportedAssets.IsEmpty())
     {
-        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("No Blueprints selected."), FText::FromString("Blueprint Analyzer"));
+        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("No Blueprints or Niagara Systems selected."), FText::FromString("Blueprint Analyzer"));
         return;
     }
 
@@ -429,36 +487,41 @@ void FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMTextForAssets(const TArr
     bool bCanceled = false;
     TArray<FString> FailedAssets;
     {
-        FScopedSlowTask Progress(BlueprintAssets.Num(), FText::FromString("Exporting one LLM report per selected Blueprint"));
+        FScopedSlowTask Progress(SupportedAssets.Num(), FText::FromString("Exporting one LLM report per selected asset"));
         Progress.MakeDialog(true);
-        for (int32 Index = 0; Index < BlueprintAssets.Num(); ++Index)
+        for (int32 Index = 0; Index < SupportedAssets.Num(); ++Index)
         {
             if (Progress.ShouldCancel())
             {
                 bCanceled = true;
                 break;
             }
-            const FAssetData& Asset = BlueprintAssets[Index];
+            const FAssetData& Asset = SupportedAssets[Index];
             Progress.EnterProgressFrame(1, FText::FromString(FString::Printf(TEXT("Analyzing %s (%d/%d)"),
-                *Asset.AssetName.ToString(), Index + 1, BlueprintAssets.Num())));
+                *Asset.AssetName.ToString(), Index + 1, SupportedAssets.Num())));
 
-            const TStrongObjectPtr<UBlueprint> Blueprint(Cast<UBlueprint>(Asset.GetAsset()));
-            if (!Blueprint.IsValid())
+            const TStrongObjectPtr<UObject> LoadedAsset(Asset.GetAsset());
+            if (!LoadedAsset.IsValid())
             {
                 FailedAssets.Add(Asset.GetObjectPathString() + TEXT(" (failed to load)"));
                 continue;
             }
 
-            const FBlueprintAnalysisResult Analysis = UBlueprintAnalyzerLibrary::AnalyzeBlueprint(Blueprint.Get());
+            const FString Report = BuildLLMReport(LoadedAsset.Get());
             if (Progress.ShouldCancel())
             {
                 bCanceled = true;
                 break;
             }
+            if (Report.IsEmpty())
+            {
+                FailedAssets.Add(Asset.GetObjectPathString() + TEXT(" (failed to analyze)"));
+                continue;
+            }
 
             const FString OutputPath = GetLLMAnalysisPath(Asset.PackagePath.ToString(),
                 Asset.AssetName.ToString() + TEXT("_LLM_Analysis.txt"));
-            if (!SaveLLMTextFile(UBlueprintAnalyzerLibrary::ExportToLLMText(Analysis), OutputPath))
+            if (!SaveLLMTextFile(Report, OutputPath))
             {
                 FailedAssets.Add(Asset.GetObjectPathString() + TEXT(" (failed to save: ") + OutputPath + TEXT(")"));
                 continue;
@@ -467,9 +530,9 @@ void FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMTextForAssets(const TArr
         }
     }
 
-    FString Message = FString::Printf(TEXT("%s\n\nLLM files exported: %d/%d\nNon-Blueprint assets skipped: %d\nOutput folder: %s"),
+    FString Message = FString::Printf(TEXT("%s\n\nLLM files exported: %d/%d\nUnsupported assets skipped: %d\nOutput folder: %s"),
         bCanceled ? TEXT("Batch LLM export canceled. Files already exported are kept.") : TEXT("Batch LLM export finished."),
-        ExportedFiles, BlueprintAssets.Num(), SkippedAssets, *GetLLMAnalysisDirectory());
+        ExportedFiles, SupportedAssets.Num(), SkippedAssets, *GetLLMAnalysisDirectory());
     if (!FailedAssets.IsEmpty())
     {
         Message += TEXT("\n\nFailed exports:\n") + FString::Join(FailedAssets, TEXT("\n"));
@@ -477,18 +540,18 @@ void FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMTextForAssets(const TArr
     FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Message), FText::FromString("Blueprint Analyzer"));
 }
 
-void FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMTextForBlueprint(UBlueprint* Blueprint)
+void FBlueprintAnalyzerMenuExtension::ExecuteExportToLLMTextForAsset(UObject* Asset)
 {
-    if (!Blueprint)
+    if (!Asset)
     {
-        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("No blueprint available."), FText::FromString("Blueprint Analyzer"));
+        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("Asset no longer available."), FText::FromString("Blueprint Analyzer"));
         return;
     }
 
-    const FString SavePath = GetLLMAnalysisPath(FPackageName::GetLongPackagePath(Blueprint->GetOutermost()->GetName()),
-        Blueprint->GetName() + TEXT("_LLM_Analysis.txt"));
-    const FBlueprintAnalysisResult AnalysisResult = UBlueprintAnalyzerLibrary::AnalyzeBlueprint(Blueprint);
-    const bool bSuccess = SaveLLMTextFile(UBlueprintAnalyzerLibrary::ExportToLLMText(AnalysisResult), SavePath);
+    const FString SavePath = GetLLMAnalysisPath(FPackageName::GetLongPackagePath(Asset->GetOutermost()->GetName()),
+        Asset->GetName() + TEXT("_LLM_Analysis.txt"));
+    const FString Report = BuildLLMReport(Asset);
+    const bool bSuccess = !Report.IsEmpty() && SaveLLMTextFile(Report, SavePath);
 
     FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(bSuccess
         ? FString::Printf(TEXT("LLM-friendly analysis exported to: %s"), *SavePath)
@@ -726,12 +789,13 @@ void FBlueprintAnalyzerMenuExtension::ExecuteExportPerformanceToLLMText()
 // Phase 4: Folder Analysis Execute Functions
 // ============================================================
 
-void FBlueprintAnalyzerMenuExtension::ExecuteExportFolderBlueprintsToLLMText(const TArray<FString>& FolderPaths)
+void FBlueprintAnalyzerMenuExtension::ExecuteExportFolderAssetsToLLMText(const TArray<FString>& FolderPaths)
 {
     FARFilter Filter;
     Filter.bRecursivePaths = true;
     Filter.bRecursiveClasses = true;
     Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+    Filter.ClassPaths.Add(UNiagaraSystem::StaticClass()->GetClassPathName());
 
     TArray<FString> ValidFolderPaths;
     for (const FString& FolderPath : FolderPaths)
@@ -750,10 +814,10 @@ void FBlueprintAnalyzerMenuExtension::ExecuteExportFolderBlueprintsToLLMText(con
 
     FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
     IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
-    TArray<FAssetData> BlueprintAssets;
+    TArray<FAssetData> SupportedAssets;
     bool bQuerySucceeded = false;
     {
-        FScopedSlowTask Progress(1, FText::FromString("Finding Blueprints in the selected folders and subfolders"));
+        FScopedSlowTask Progress(1, FText::FromString("Finding Blueprints and Niagara Systems in the selected folders and subfolders"));
         Progress.MakeDialog(true);
         Progress.EnterProgressFrame(1);
         if (Progress.ShouldCancel()) return;
@@ -761,25 +825,25 @@ void FBlueprintAnalyzerMenuExtension::ExecuteExportFolderBlueprintsToLLMText(con
         // Finish discovery in these paths even if the editor's initial registry scan is still running.
         AssetRegistry.ScanPathsSynchronous(ValidFolderPaths, false);
         if (Progress.ShouldCancel()) return;
-        bQuerySucceeded = AssetRegistry.GetAssets(Filter, BlueprintAssets);
+        bQuerySucceeded = AssetRegistry.GetAssets(Filter, SupportedAssets);
         if (Progress.ShouldCancel()) return;
     }
     if (!bQuerySucceeded)
     {
-        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("Failed to find Blueprints in the selected folders."), FText::FromString("Blueprint Analyzer"));
+        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("Failed to query assets in the selected folders."), FText::FromString("Blueprint Analyzer"));
         return;
     }
-    if (BlueprintAssets.IsEmpty())
+    if (SupportedAssets.IsEmpty())
     {
-        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("No Blueprints found in the selected folders or subfolders."), FText::FromString("Blueprint Analyzer"));
+        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString("No Blueprints or Niagara Systems found in the selected folders or subfolders."), FText::FromString("Blueprint Analyzer"));
         return;
     }
 
-    BlueprintAssets.Sort([](const FAssetData& A, const FAssetData& B)
+    SupportedAssets.Sort([](const FAssetData& A, const FAssetData& B)
     {
         return A.GetObjectPathString() < B.GetObjectPathString();
     });
-    ExecuteExportToLLMTextForAssets(BlueprintAssets);
+    ExecuteExportToLLMTextForAssets(SupportedAssets);
 }
 
 FString FBlueprintAnalyzerMenuExtension::GetSelectedFolderPath()

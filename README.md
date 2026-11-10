@@ -41,15 +41,16 @@ A comprehensive Unreal Engine 5 editor plugin that performs deep structural anal
 
 ### 📁 Project-Level Batch Analysis
 - **Folder Analysis**: Right-click any Content Browser folder → analyze every Blueprint inside
-- **Recursive Folder LLM Exports**: Select one or more folders to export a separate LLM text file for every Blueprint in their subfolders, including Widget and Animation Blueprints, with no duplicate exports for overlapping selections
+- **Recursive Folder LLM Exports**: Select one or more folders to export a separate LLM text file for each Blueprint or Niagara System, including assets in overlapping subfolders only once.
 - **Aggregate Report**: Total nodes, average performance score, top 10 worst offenders sorted by score
 - **Dependency Graph**: Extract Spawn / Cast / Call / HardRef references between Blueprints
 - **Circular Dependency Detection**: Automated cycle discovery across the project
 - **Bulk Token Estimation**: Per-Blueprint LLM token budget upfront
 
 ### 🔧 Editor Integration
+- **Niagara Systems**: export the system, emitter configuration and module input sources from the Content Browser or the Niagara System editor.
 - **Right-click on any Blueprint**: full per-asset analysis menus
-- **Multi-select Blueprints**: export a separate LLM text file for every selected Blueprint
+- **Multi-select assets**: export one LLM text file per selected Blueprint or Niagara System.
 - **Automatic LLM Exports**: save reports under the project's `Saved/LLMAnalisys`, preserving Unreal package folders and overwriting previous reports
 - **Right-click on any Content Browser folder**: batch project analysis
 - **Non-destructive**: never modifies your Blueprints
@@ -79,21 +80,29 @@ A comprehensive Unreal Engine 5 editor plugin that performs deep structural anal
 
 All LLM text exports use the project's `Saved/LLMAnalisys` folder, which is created automatically. Reports preserve the logical Unreal package path: `/Game/Characters/BP_Player` exports to `Saved/LLMAnalisys/Game/Characters/BP_Player_LLM_Analysis.txt`. Existing reports are always overwritten, with no folder picker, save-file dialog, or overwrite confirmation. The Blueprint editor's **Analyze LLM** toolbar button uses the same destination.
 
-### Multiple Blueprint LLM Exports
-1. Select multiple Blueprints in the Content Browser (Ctrl-click or Shift-click), including Widget and Animation Blueprints if needed
-2. Right-click → **Blueprint Analyzer** → **Analyze Selected Blueprints for LLM**
-3. Each Blueprint automatically gets its own `<AssetName>_LLM_Analysis.txt` under `Saved/LLMAnalisys`, with the same complete analysis as a single-asset export
+### Multiple asset LLM exports
+1. Select Blueprints, Niagara Systems or a mixture of both in the Content Browser (Ctrl-click or Shift-click)
+2. Right-click → **Blueprint Analyzer** → **Analyze Selected Blueprints and Niagara Systems for LLM**
+3. Each supported asset gets its own `<AssetName>_LLM_Analysis.txt` under `Saved/LLMAnalisys`, with the same analysis as a single-asset export
 4. Unreal package folders are preserved, so assets with the same name in different folders stay separate
-5. Review the final counts of exported files, skipped non-Blueprint assets, and any failures
+5. Review the final counts of exported files, skipped unsupported assets, and any failures
 
 Widget optimization, Blueprint performance, and folder LLM reports also save automatically under `Saved/LLMAnalisys`, preserving their source package folders and distinct report filenames. JSON exports continue to use a save-file dialog.
 
-### Folder Blueprint LLM Exports
+### Folder LLM exports
 1. Select one or more folders in the Content Browser
-2. Right-click → **Blueprint Analyzer** → **Analyze Blueprints in Selected Folders for LLM**
-3. Every Blueprint in the selected folders and all subfolders gets its own `<AssetName>_LLM_Analysis.txt` under `Saved/LLMAnalisys`, preserving its logical Unreal package path and automatically overwriting existing reports
+2. Right-click → **Blueprint Analyzer** → **Analyze Blueprints and Niagara Systems in Selected Folders for LLM**
+3. Each Blueprint or Niagara System in the selected folders and subfolders gets its own `<AssetName>_LLM_Analysis.txt` under `Saved/LLMAnalisys`, preserving its logical Unreal package path and automatically overwriting existing reports
 
 This includes all Blueprint subclasses, such as Widget and Animation Blueprints. Selecting both a parent folder and its subfolders exports each asset only once. **Analyze Folder** and the aggregate project reports remain available separately.
+
+### Niagara System analysis
+
+Right-click a Niagara System in the Content Browser and choose **Blueprint Analyzer → Export to LLM Text**. The **Analyze LLM** button in the Niagara System editor writes the same report. For example, `/Game/VFX/NS_Trail` exports to `Saved/LLMAnalisys/Game/VFX/NS_Trail_LLM_Analysis.txt`. Choose **Export Niagara System to JSON** for a machine-readable copy. A multi-selection or a recursive folder export can contain both Blueprints and Niagara Systems.
+
+The text starts with an effect overview. For a standard emitter, the module list gives the stack order within each script. Connections and overrides show how values reach module inputs, including links to user parameters and dynamic inputs. Referenced project and scratch scripts include their available source graphs and custom HLSL. External stock scripts under `/Engine/` and `/Niagara/` are identified by version and input interface. For a lightweight emitter, use the spawn entries, module settings and renderers. The JSON export includes the saved settings of disabled modules.
+
+The report describes the saved or currently edited asset. Active particle counts, runtime parameter values and timings depend on the component, scene and platform. Blueprint performance scores and aggregate Blueprint folder reports apply to Blueprints only.
 
 ### Blueprint Performance Audit
 1. Right-click any Blueprint → **Performance Analysis** → **Analyze Blueprint Performance**

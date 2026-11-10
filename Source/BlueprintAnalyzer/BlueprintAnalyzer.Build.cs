@@ -50,7 +50,9 @@ public class BlueprintAnalyzer : ModuleRules
 				"ContentBrowser",
 				"ContentBrowserData",
 				"GraphEditor",
-				"DesktopPlatform"
+				"DesktopPlatform",
+				"Niagara",
+				"NiagaraEditor"
 			}
 			);
 		

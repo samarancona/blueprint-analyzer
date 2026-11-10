@@ -10,6 +10,8 @@
 #include "K2Node.h"
 #include "BlueprintAnalyzerLibrary.generated.h"
 
+class UNiagaraSystem;
+
 USTRUCT(BlueprintType)
 struct BLUEPRINTANALYZER_API FBlueprintNodeInfo
 {
@@ -709,6 +711,13 @@ public:
     // Original Blueprint Analysis Functions
     UFUNCTION(BlueprintCallable, Category = "BlueprintAnalyzer", meta=(CallInEditor="true"))
     static FBlueprintAnalysisResult AnalyzeBlueprint(UBlueprint* Blueprint);
+
+    /** Export the authored Niagara system, its emitter stacks, settings and bindings. */
+    UFUNCTION(BlueprintCallable, Category = "BlueprintAnalyzer|Niagara", meta=(CallInEditor="true"))
+    static FString ExportNiagaraSystemToLLMText(UNiagaraSystem* System);
+
+    UFUNCTION(BlueprintCallable, Category = "BlueprintAnalyzer|Niagara", meta=(CallInEditor="true"))
+    static FString ExportNiagaraSystemToJSON(UNiagaraSystem* System);
 
     UFUNCTION(BlueprintCallable, Category = "BlueprintAnalyzer", meta=(CallInEditor="true"))
     static FString ExportToJSON(const FBlueprintAnalysisResult& AnalysisResult);

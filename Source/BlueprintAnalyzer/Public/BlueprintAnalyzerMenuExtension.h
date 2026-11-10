@@ -19,15 +19,16 @@ public:
 
 private:
     static void RegisterMenuExtensions();
-    static void RegisterBlueprintEditorToolbarExtension(UToolMenus* ToolMenus);
-    static void AddBlueprintEditorToolbarButton(FToolMenuSection& Section);
+    static void RegisterAssetEditorToolbarExtension(UToolMenus* ToolMenus);
+    static void AddAssetEditorToolbarButton(FToolMenuSection& Section);
     
     // Original Blueprint Analysis Functions
     static void ExecuteAnalyzeBlueprint();
     static void ExecuteAnalyzeBlueprintForBlueprint(UBlueprint* Blueprint);
     static void ExecuteExportToJSON();
+    static void ExecuteExportNiagaraToJSON(const FAssetData& Asset);
     static void ExecuteExportToLLMTextForAssets(const TArray<FAssetData>& SelectedAssets);
-    static void ExecuteExportToLLMTextForBlueprint(UBlueprint* Blueprint);
+    static void ExecuteExportToLLMTextForAsset(UObject* Asset);
     
     // New Widget Blueprint Analysis Functions
     static void ExecuteAnalyzeWidgetBlueprint();
@@ -41,7 +42,7 @@ private:
     static void ExecuteExportPerformanceToLLMText();
 
     // Phase 4: Project Folder Analysis
-    static void ExecuteExportFolderBlueprintsToLLMText(const TArray<FString>& FolderPaths);
+    static void ExecuteExportFolderAssetsToLLMText(const TArray<FString>& FolderPaths);
     static void ExecuteAnalyzeFolder();
     static void ExecuteExportProjectToJSON();
     static void ExecuteExportProjectToLLMText();
